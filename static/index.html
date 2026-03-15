@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgriSense — Remote Sensing Platform</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+    <link rel="stylesheet" href="/static/style.css?v=2" />
+</head>
+<body>
+    <div id="app">
+        <div id="sidebar">
+            <div id="header">
+                <h1>AgriSense</h1>
+                <p>Remote Sensing Analysis Platform</p>
+            </div>
+
+            <div id="scrollable-middle">
+                <div id="tools-panel">
+                    <h3>Analysis Tools</h3>
+                    <div class="tool-group">
+                        <button id="btn-preview" class="tool-btn" title="Download and display satellite RGB imagery">
+                            Satellite Preview
+                        </button>
+                        <button id="btn-ndvi" class="tool-btn" title="Compute NDVI vegetation health index">
+                            NDVI Index
+                        </button>
+                    </div>
+
+                    <div class="tool-group sam-group">
+                        <button id="btn-sam-load" class="tool-btn sam-btn" title="Load area into SAM for interactive segmentation">
+                            SAM Load Area
+                        </button>
+                        <div id="sam-controls" class="hidden">
+                            <div class="sam-mode">
+                                <label><input type="radio" name="sam-click" value="fg" checked> Foreground (include)</label>
+                                <label><input type="radio" name="sam-click" value="bg"> Background (exclude)</label>
+                            </div>
+                            <button id="btn-sam-clear" class="tool-btn-small">Clear Points</button>
+                        </div>
+                    </div>
+
+                    <div id="date-controls">
+                        <h4>Season Dates</h4>
+                        <label>Spring</label>
+                        <div class="date-range">
+                            <input type="date" id="date-spring-start" value="2023-04-20" />
+                            <span class="date-sep">to</span>
+                            <input type="date" id="date-spring-end" value="2023-05-31" />
+                        </div>
+                        <label>Peak</label>
+                        <div class="date-range">
+                            <input type="date" id="date-peak-start" value="2023-07-01" />
+                            <span class="date-sep">to</span>
+                            <input type="date" id="date-peak-end" value="2023-07-31" />
+                        </div>
+                        <label>Late</label>
+                        <div class="date-range">
+                            <input type="date" id="date-late-start" value="2023-09-01" />
+                            <span class="date-sep">to</span>
+                            <input type="date" id="date-late-end" value="2023-09-30" />
+                        </div>
+                    </div>
+
+                    <div id="presets">
+                        <h4>Quick Regions</h4>
+                        <div class="preset-grid"></div>
+                    </div>
+                </div>
+
+                <div id="results-panel">
+                    <h3>Results</h3>
+                    <div id="stats-display">
+                        <p class="placeholder">Select an area and run an analysis tool.</p>
+                    </div>
+                    <div id="legend" class="hidden"></div>
+                </div>
+            </div>
+
+            <div id="chat-panel">
+                <h3>AI Chat <span id="chat-provider-badge" class="provider-badge"></span></h3>
+                <div id="chat-messages">
+                    <div class="chat-msg assistant">Hello! I'm AgriSense AI. Select an area on the map and run analyses. Ask me anything about crop classification or remote sensing.</div>
+                </div>
+                <div id="chat-input-area">
+                    <input type="text" id="chat-input" placeholder="Ask about the analysis..." />
+                    <button id="chat-send">Send</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="map-container">
+            <div id="map"></div>
+            <div id="job-status" class="hidden">
+                <div class="status-content">
+                    <div class="spinner"></div>
+                    <span id="status-text">Processing...</span>
+                </div>
+            </div>
+            <div id="bbox-info" class="hidden"></div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+    <script src="/static/app.js?v=2"></script>
+</body>
+</html>
