@@ -11,7 +11,6 @@ cd "$(dirname "$0")"
 
 PROVIDER="${1:-local}"
 OLLAMA_BIN="${OLLAMA_BIN:-$(command -v ollama || echo "$HOME/.local/bin/ollama")}"
-PYTHON="${PYTHON:-$(command -v python || echo "python3")}"
 
 case "$PROVIDER" in
     local|ollama)
@@ -61,4 +60,4 @@ echo "  AgriSense — Remote Sensing Platform"
 echo "  http://localhost:8000"
 echo "=================================================="
 
-exec "$PYTHON" server.py
+exec uv run python server.py

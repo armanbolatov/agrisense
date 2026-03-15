@@ -4,3 +4,5 @@ __pycache__/
 workspace/
 *.log
 .env
+.venv/
+uv.lock

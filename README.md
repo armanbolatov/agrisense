@@ -13,18 +13,15 @@ Remote sensing analysis platform built on Sentinel-2 satellite data from Microso
 ## Quick Start
 
 ```bash
-# Install dependencies
-uv pip install -r requirements.txt
+# Run (uv will install dependencies automatically)
+uv run python server.py
 
-# Download SAM checkpoint (once)
-python -c "import urllib.request, os; p=os.path.expanduser('~/.cache/torch/hub/checkpoints'); os.makedirs(p,exist_ok=True); urllib.request.urlretrieve('https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth', f'{p}/sam_vit_h_4b8939.pth')"
-
-# Run with Ollama (default)
+# Or use the start script with AI chat (Ollama)
 ./start.sh
 
 # Or specify a chat provider
-./start.sh anthropic   # needs ANTHROPIC_API_KEY
-./start.sh openai      # needs OPENAI_API_KEY
+ANTHROPIC_API_KEY=sk-... ./start.sh anthropic
+OPENAI_API_KEY=sk-... ./start.sh openai
 ```
 
 Open http://localhost:8000 in your browser.
