@@ -14,10 +14,10 @@ Remote sensing analysis platform built on Sentinel-2 satellite data from Microso
 
 ```bash
 # Install dependencies
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 
 # Download SAM checkpoint (once)
-python -c "from segment_anything import sam_model_registry; import urllib.request; urllib.request.urlretrieve('https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth', '$HOME/.cache/torch/hub/checkpoints/sam_vit_h_4b8939.pth')"
+python -c "import urllib.request, os; p=os.path.expanduser('~/.cache/torch/hub/checkpoints'); os.makedirs(p,exist_ok=True); urllib.request.urlretrieve('https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth', f'{p}/sam_vit_h_4b8939.pth')"
 
 # Run with Ollama (default)
 ./start.sh
