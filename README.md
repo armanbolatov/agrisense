@@ -12,16 +12,23 @@ Remote sensing analysis platform built on Sentinel-2 satellite data from Microso
 
 ## Quick Start
 
+Requires [uv](https://docs.astral.sh/uv/) and Python 3.11+.
+
 ```bash
-# Run (uv will install dependencies automatically)
-uv run python server.py
+git clone https://github.com/armanbolatov/agrisense.git
+cd agrisense
+uv sync              # install dependencies
+./start.sh           # start with Ollama (default)
+```
 
-# Or use the start script with AI chat (Ollama)
-./start.sh
+Open http://localhost:8000 in your browser.
 
-# Or specify a chat provider
-ANTHROPIC_API_KEY=sk-... ./start.sh anthropic
-OPENAI_API_KEY=sk-... ./start.sh openai
+### Chat Providers
+
+```bash
+./start.sh                                    # Ollama (qwen2.5:3b)
+ANTHROPIC_API_KEY=sk-... ./start.sh anthropic  # Anthropic
+OPENAI_API_KEY=sk-... ./start.sh openai        # OpenAI
 ```
 
 Open http://localhost:8000 in your browser.
