@@ -9,7 +9,6 @@ Usage:
 """
 
 import os
-import sys
 import json
 import asyncio
 import traceback
@@ -86,6 +85,21 @@ class SamPredictRequest(BaseModel):
     box: list[float] | None = None  # [west, south, east, north]
 
 
+class TimeSeriesRequest(BaseModel):
+    bbox: list[float]
+    # Monthly windows across the 2023 growing season by default.
+    date_windows: list[str] = [
+        f"2023-{m:02d}-01/2023-{m:02d}-28" for m in range(4, 11)
+    ]
+
+
+class CropMapRequest(BaseModel):
+    bbox: list[float]
+    date_windows: list[str] = [
+        f"2023-{m:02d}-01/2023-{m:02d}-28" for m in range(4, 11)
+    ]
+
+
 class ChatRequest(BaseModel):
     message: str
     bbox: list[float] | None = None
@@ -103,82 +117,90 @@ REGION_PRESETS = [
     {"name": "Almaty Region", "bbox": [76.8, 43.15, 77.05, 43.3], "country": "Kazakhstan"},
 ]
 
-async def _geocode_region(text):
-    """Geocode a place name using OpenStreetMap Nominatim.
+async def _geocode_region(text, force=False):
+    """Geocode a place name anywhere in the world using OpenStreetMap Nominatim.
 
     Extracts the place name from the text (strips command words like
-    'select', 'show', 'go to'), queries Nominatim, and returns a ~25km bbox
-    centered on the result.
+    'select', 'show', 'go to'), queries Nominatim globally, and returns a ~25km
+    bbox centered on the result.
+
+    force=True (used for explicit "select X" commands) skips the conversational
+    filters and always attempts a lookup.
 
     Returns (bbox, name) or (None, None).
     """
     import re
     import httpx
 
-    # Skip messages that are clearly questions or long sentences, not place names
     text_lower = text.lower().strip()
-    if any(w in text_lower for w in ['what', 'how', 'why', 'when', 'which', 'where',
-                                      'can you', 'tell me', 'explain', 'help',
-                                      'classify', 'ndvi', 'analysis', 'satellite']):
-        return None, None
-    # Skip very long messages (likely questions, not place names)
-    if len(text.split()) > 8:
-        return None, None
+    if not force:
+        # Opportunistic path (bare text): skip obvious chat so greetings and
+        # questions don't get geocoded ("hi" -> some embassy and hijacks the map).
+        GREETINGS = {
+            "hi", "hii", "hiya", "hello", "helo", "hey", "yo", "sup", "hola",
+            "thanks", "thank you", "thx", "ty", "ok", "okay", "k", "yes", "yep",
+            "no", "nope", "cool", "nice", "good", "great", "hmm", "test", "testing",
+            "bye", "goodbye", "please", "sure", "wow", "lol", "morning",
+        }
+        if text_lower.strip(".,!?") in GREETINGS:
+            return None, None
+        if any(w in text_lower for w in ['what', 'how', 'why', 'when', 'which', 'where',
+                                          'can you', 'tell me', 'explain', 'help',
+                                          'classify', 'ndvi', 'analysis', 'satellite', '?']):
+            return None, None
+        if len(text.split()) > 8:
+            return None, None
 
-    # Strip common command words to extract the place name
+    # Strip command + greeting/politeness words to extract the place name
+    # ("hi, select london please" -> "london", "take me to tokyo" -> "tokyo").
     cleaned = re.sub(
-        r'\b(select|show|go\s+to|navigate|find|zoom|display|me|the|region|area|oblast|province)\b',
+        r'\b(hi+|hello|hey|yo|hiya|please|thanks|thank|you|can|could|would|will|ok|okay|'
+        r'select|show|go|navigate|find|zoom|display|open|fly|take|move|center|'
+        r'to|on|me|the|region|area|oblast|province)\b',
         '', text, flags=re.IGNORECASE,
     ).strip().strip('.,!?')
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     if not cleaned or len(cleaned) < 2:
         return None, None
 
+    async def _search(client, q):
+        resp = await client.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": q, "format": "json", "limit": 1, "addressdetails": 1},
+            headers={"User-Agent": "AgriSense/1.0"},
+        )
+        return resp.json()
+
+    # Retry once — Nominatim occasionally times out, and a silent miss makes a
+    # navigation command look like it failed.
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                results = await _search(client, cleaned)  # worldwide
+            break
+        except Exception as e:
+            print(f"Geocode error (attempt {attempt + 1}): {e}")
+            results = None
+
+    if not results:
+        return None, None
+
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                "https://nominatim.openstreetmap.org/search",
-                params={
-                    "q": cleaned + ", Kazakhstan",
-                    "format": "json",
-                    "limit": 1,
-                    "addressdetails": 1,
-                },
-                headers={"User-Agent": "AgriSense/1.0"},
-            )
-            results = resp.json()
-            if not results:
-                # Try without appending Kazakhstan
-                resp = await client.get(
-                    "https://nominatim.openstreetmap.org/search",
-                    params={
-                        "q": cleaned,
-                        "format": "json",
-                        "limit": 1,
-                        "addressdetails": 1,
-                    },
-                    headers={"User-Agent": "AgriSense/1.0"},
-                )
-                results = resp.json()
+        hit = results[0]
+        lat = float(hit["lat"])
+        lon = float(hit["lon"])
+        name = hit.get("display_name", cleaned).split(",")[0]
 
-            if not results:
-                return None, None
-
-            hit = results[0]
-            lat = float(hit["lat"])
-            lon = float(hit["lon"])
-            name = hit.get("display_name", cleaned).split(",")[0]
-
-            # Build a ~25x25 km bbox centered on the point
-            dlat = 0.125  # ~13.9 km
-            dlon = 0.125 / abs(np.cos(np.radians(lat)))  # adjust for latitude
-            bbox = [
-                round(lon - dlon, 4),
-                round(lat - dlat, 4),
-                round(lon + dlon, 4),
-                round(lat + dlat, 4),
-            ]
-            return bbox, name
+        # Build a ~25x25 km bbox centered on the point
+        dlat = 0.125  # ~13.9 km
+        dlon = 0.125 / abs(np.cos(np.radians(lat)))  # adjust for latitude
+        bbox = [
+            round(lon - dlon, 4),
+            round(lat - dlat, 4),
+            round(lon + dlon, 4),
+            round(lat + dlat, 4),
+        ]
+        return bbox, name
     except Exception as e:
         print(f"Geocode error: {e}")
         return None, None
@@ -377,6 +399,140 @@ def _run_ndvi(job_id, bbox, date_ranges):
 
 
 # ---------------------------------------------------------------------------
+# NDVI Time Series
+# ---------------------------------------------------------------------------
+
+@app.post("/api/timeseries")
+async def timeseries(req: TimeSeriesRequest, background_tasks: BackgroundTasks):
+    _validate_bbox(req.bbox)
+    job_id = str(uuid4())
+    jobs[job_id] = {"status": "queued", "type": "timeseries"}
+    background_tasks.add_task(_run_timeseries, job_id, req.bbox, req.date_windows)
+    return {"job_id": job_id}
+
+
+def _run_timeseries(job_id, bbox, date_windows):
+    try:
+        jobs[job_id]["status"] = "downloading"
+        jobs[job_id]["message"] = f"Sampling NDVI across {len(date_windows)} date windows..."
+
+        from satellite import download_ndvi_series
+        from indices import describe_phenology
+
+        series = download_ndvi_series(bbox, date_windows)
+        if not series:
+            raise ValueError("No cloud-free scenes found in any date window.")
+
+        phenology = describe_phenology(series)
+        # The frontend renders `series` as an interactive Plotly chart.
+        result = {
+            "series": series,
+            "phenology": phenology,
+            "bbox": bbox,
+        }
+
+        latest_results["timeseries"] = result
+        jobs[job_id] = {"status": "complete", "type": "timeseries", "result": result}
+
+    except Exception as e:
+        traceback.print_exc()
+        jobs[job_id] = {"status": "error", "error": str(e), "type": "timeseries"}
+
+
+# ---------------------------------------------------------------------------
+# Crop Map — seasonal per-pixel classification + per-month overlays (slider)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/cropmap")
+async def cropmap(req: CropMapRequest, background_tasks: BackgroundTasks):
+    _validate_bbox(req.bbox)
+    job_id = str(uuid4())
+    jobs[job_id] = {"status": "queued", "type": "cropmap"}
+    background_tasks.add_task(_run_cropmap, job_id, req.bbox, req.date_windows)
+    return {"job_id": job_id}
+
+
+def _cropmap_terramind(job_id, bbox):
+    """Try the TerraMind crop model service. Returns result dict or None."""
+    tm_url = os.environ.get("TERRAMIND_URL")
+    if not tm_url:
+        return None
+    try:
+        import httpx
+        jobs[job_id]["status"] = "computing"
+        jobs[job_id]["message"] = "Running TerraMind crop model (GPU)..."
+        # The model expects three seasonal acquisitions (spring / peak / late).
+        date_ranges = [
+            "2023-04-20/2023-05-31",
+            "2023-07-01/2023-07-31",
+            "2023-09-01/2023-09-30",
+        ]
+        resp = httpx.post(f"{tm_url}/classify",
+                          json={"bbox": bbox, "date_ranges": date_ranges}, timeout=240.0)
+        resp.raise_for_status()
+        result = resp.json()
+        if "error" in result:
+            return None
+        result.setdefault("bbox", bbox)
+        return result
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def _run_cropmap(job_id, bbox, date_windows):
+    try:
+        # Prefer the TerraMind model; fall back to the rule-based classifier.
+        tm = _cropmap_terramind(job_id, bbox)
+        if tm is not None:
+            latest_results["cropmap"] = {
+                "legend": tm["legend"], "months": tm.get("months", []),
+                "model": tm.get("model", "terramind_v1_base"),
+            }
+            jobs[job_id] = {"status": "complete", "type": "cropmap", "result": tm}
+            return
+
+        jobs[job_id]["status"] = "downloading"
+        jobs[job_id]["message"] = f"Building monthly NDVI stack ({len(date_windows)} months)..."
+
+        from cropmap import (
+            download_monthly_ndvi_stack, classify_seasonal, class_map_to_png,
+        )
+        from geo_utils import index_to_colored_png
+
+        months, ndvi_stack, ndwi_mean = download_monthly_ndvi_stack(bbox, date_windows)
+
+        jobs[job_id]["status"] = "computing"
+        jobs[job_id]["message"] = "Classifying crops from seasonal profile..."
+
+        class_map, areas = classify_seasonal(months, ndvi_stack, ndwi_mean)
+
+        # Per-month NDVI overlays drive the season slider on the frontend.
+        monthly = [
+            {
+                "month": m,
+                "image": index_to_colored_png(ndvi_stack[i], bbox, colormap="RdYlGn",
+                                              vmin=-0.2, vmax=0.9),
+            }
+            for i, m in enumerate(months)
+        ]
+
+        result = {
+            "bbox": bbox,
+            "class_image": class_map_to_png(class_map),
+            "legend": areas,
+            "months": months,
+            "monthly": monthly,
+        }
+        latest_results["cropmap"] = {"legend": areas, "months": months}
+        jobs[job_id] = {"status": "complete", "type": "cropmap", "result": result}
+
+    except Exception as e:
+        traceback.print_exc()
+        jobs[job_id] = {"status": "error", "error": str(e), "type": "cropmap"}
+
+
+# ---------------------------------------------------------------------------
 # Chat — supports Anthropic API, OpenAI API, or any OpenAI-compatible local LLM
 # ---------------------------------------------------------------------------
 #
@@ -397,24 +553,49 @@ def _build_system_prompt(bbox, results):
     if "ndvi" in results:
         ndvi_stats = results["ndvi"].get("stats", {})
         context_parts.append(f"Latest NDVI stats: {json.dumps(ndvi_stats)}")
+    if "timeseries" in results:
+        ts = results["timeseries"]
+        # Serialize the temporal profile compactly: the instruction-tuned LLM
+        # reasons over it as text (date: mean NDVI pairs + phenology summary).
+        points = ", ".join(f"{p['date']}: {p['ndvi_mean']}" for p in ts["series"])
+        context_parts.append(f"NDVI time series (date: mean NDVI): {points}")
+        context_parts.append(f"Phenology analysis: {json.dumps(ts['phenology'])}")
+    if "cropmap" in results:
+        cm = results["cropmap"]
+        breakdown = ", ".join(f"{c['label']}: {c['percent']}%" for c in cm["legend"] if c["percent"] > 0)
+        model = cm.get("model", "rule-based seasonal")
+        context_parts.append(f"Crop classification ({model}, share of area): {breakdown}")
 
     context = "\n".join(context_parts) if context_parts else "No analysis has been run yet."
 
-    return f"""You are AgriSense, an AI assistant for remote sensing and crop analysis.
-You help users analyze satellite imagery, understand crop classification results, and interpret vegetation indices.
+    return f"""You are the assistant inside AgriSense, a satellite remote-sensing app for
+Kazakhstan agriculture (Sentinel-2 imagery from Microsoft Planetary Computer).
 
-Available tools the user can trigger from the UI:
-- Satellite Preview: View RGB satellite imagery for an area
-- SAM Segmentation: Interactive click-to-segment using Segment Anything Model
-- NDVI: Compute vegetation health index
+STRICT SCOPE — this is your ONLY purpose. You only help with AgriSense's analysis:
+- interpreting its results (NDVI, vegetation indices, NDVI time series / phenology,
+  and crop classification) shown under "Current state" below,
+- explaining the related remote-sensing concepts,
+- telling the user which button to click.
 
-The platform uses Sentinel-2 satellite data from Microsoft Planetary Computer.
+If the user asks for ANYTHING outside this scope — writing or debugging code, math,
+general knowledge, translation, jokes, chit-chat, other software, etc. — you MUST
+refuse and NOT fulfil it. In that case reply with exactly this and nothing else:
+"I can only help with the satellite imagery and crop analysis here in AgriSense."
+
+The app buttons are: "Satellite preview", "NDVI index", "NDVI time series",
+"Classify crops" (crop classification map), and "SAM segment". To analyse an area the
+user first draws a rectangle on the map or picks a Quick region, then clicks a button.
+
+Rules:
+- Base every factual claim on the "Current state" data. Never invent numbers or results.
+- If no analysis has been run yet, tell the user to select an area and click a button.
+- Be concise: 1-3 sentences, plain text, no markdown, no code blocks.
+
+Crop phenology hints: winter crops peak in May-June, spring/summer crops peak in
+July-August, grassland/forest stays high and flat, bare/fallow stays low all season.
 
 Current state:
-{context}
-
-Be concise and helpful. If the user asks to run an analysis, tell them which button to click.
-Respond in 2-4 sentences unless more detail is needed."""
+{context}"""
 
 
 def _detect_action(text):
@@ -477,28 +658,42 @@ async def _chat_openai_compatible(system_prompt, history, base_url=None, api_key
 
 
 def _is_navigation_command(text):
-    """Check if the message is a navigation/selection command."""
+    """True if the message is an explicit 'select/go to/show ... <place>' command,
+    even when wrapped in greetings/politeness ('hi, select london please',
+    'can you go to paris')."""
     import re
+    # Strip a leading greeting / "can you" / "please" wrapper, then check whether
+    # the remainder starts with a navigation verb.
+    stripped = re.sub(
+        r'^\s*((hi+|hello|hey|yo|hiya|ok|okay)[\s,!.]+)*'
+        r'((can|could|would|will)\s+you[\s,]*)?(please[\s,]*)?',
+        '', text, flags=re.IGNORECASE,
+    )
     return bool(re.match(
-        r'^\s*(select|show|go\s+to|navigate|find|zoom|display|fly\s+to|open)\b',
-        text, re.IGNORECASE,
+        r'^(select|show|go\s+to|navigate(\s+to)?|find|zoom(\s+to)?|display|open|'
+        r'fly\s+to|take\s+me\s+to|move\s+to|center\s+on)\b',
+        stripped, re.IGNORECASE,
     ))
 
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    # If it looks like a navigation command, geocode directly — skip the LLM
-    if _is_navigation_command(req.message):
-        bbox, region_name = await _geocode_region(req.message)
-        if bbox:
-            return {
-                "response": f"Navigating to {region_name}.",
-                "action": None,
-                "bbox": bbox,
-                "region_name": region_name,
-            }
-        else:
-            return {"response": "Could not find that location. Try a different name.", "action": None}
+    # Navigation: an explicit "select X" command forces a worldwide lookup; a
+    # bare place name is tried opportunistically. Real questions fall through to
+    # the LLM (the geocoder filters them out), so the map never jumps on a question.
+    nav = _is_navigation_command(req.message)
+    bbox, region_name = await _geocode_region(req.message, force=nav)
+    if bbox:
+        return {
+            "response": f"Selected {region_name}. Run any analysis tool, or ask me about it.",
+            "action": None,
+            "bbox": bbox,
+            "region_name": region_name,
+        }
+    if nav:
+        # Explicit command but nothing found — tell the user instead of refusing.
+        return {"response": "I couldn't find that place. Try the city or region name again.",
+                "action": None}
 
     # Otherwise run through the LLM
     provider = _get_chat_provider()
@@ -543,15 +738,7 @@ async def chat(req: ChatRequest):
             return {"response": f"Unknown chat provider: {provider}", "action": None}
 
         history.append({"role": "assistant", "content": assistant_msg})
-
-        # Also try geocoding the user message for any place mentions
-        result = {"response": assistant_msg, "action": _detect_action(assistant_msg)}
-        bbox, region_name = await _geocode_region(req.message)
-        if bbox:
-            result["bbox"] = bbox
-            result["region_name"] = region_name
-
-        return result
+        return {"response": assistant_msg, "action": _detect_action(assistant_msg)}
 
     except Exception as e:
         return {"response": f"Chat error: {str(e)}", "action": None}
@@ -580,6 +767,32 @@ async def chat_provider_info():
         "local_url": os.environ.get("LOCAL_LLM_URL", ""),
         "local_model": os.environ.get("LOCAL_LLM_MODEL", ""),
     }
+
+
+@app.on_event("startup")
+async def _warmup_llm():
+    """Fire a couple of throwaway generations at boot so the first real user
+    message doesn't pay vLLM's one-time kernel-JIT latency spike."""
+    async def run():
+        provider = _get_chat_provider()
+        if provider not in ("local", "openai"):
+            return
+        for attempt in range(6):  # vLLM may still be loading right after boot
+            try:
+                if provider == "local":
+                    await _chat_openai_compatible(
+                        "warmup", [{"role": "user", "content": "hi"}],
+                        base_url=os.environ.get("LOCAL_LLM_URL", "http://localhost:11434/v1"),
+                        api_key=os.environ.get("LOCAL_LLM_API_KEY", "none"),
+                        model=os.environ.get("LOCAL_LLM_MODEL", "llama3"),
+                    )
+                else:
+                    await _chat_openai_compatible("warmup", [{"role": "user", "content": "hi"}])
+                print("LLM warmup complete")
+                return
+            except Exception:
+                await asyncio.sleep(5)
+    asyncio.create_task(run())
 
 
 # ---------------------------------------------------------------------------

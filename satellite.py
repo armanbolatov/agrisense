@@ -3,6 +3,8 @@
 Adapted from /home/arman/terramind/run_crop_kz.py
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import rasterio
 from rasterio.windows import from_bounds
@@ -111,14 +113,15 @@ def download_rgb(bbox, date_range, on_progress=None):
         cloud = item.properties.get("eo:cloud_cover", "?")
         on_progress(f"Found scene (cloud: {cloud:.1f}%), downloading RGB...")
 
-    # Read B04 (Red), B03 (Green), B02 (Blue)
-    red, _, _ = read_band(item, "B04", bbox, 10)
-    target = red.shape
-    green, _, _ = read_band(item, "B03", bbox, 10, target_size=target)
-    blue, win_transform, crs = read_band(item, "B02", bbox, 10, target_size=target)
+    # Read B04 (Red), B03 (Green), B02 (Blue) — all native 10 m, so they share
+    # a grid. Read them concurrently (rasterio releases the GIL during I/O).
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        (red, _, _), (green, _, _), (blue, win_transform, crs) = pool.map(
+            lambda b: read_band(item, b, bbox, 10), ["B04", "B03", "B02"]
+        )
 
-    # Ensure consistent sizes
-    red = _ensure_size(red, target)
+    # Ensure consistent sizes (use red as the reference)
+    target = red.shape
     green = _ensure_size(green, target)
     blue = _ensure_size(blue, target)
 
@@ -146,6 +149,59 @@ def download_rgb(bbox, date_range, on_progress=None):
     return rgb, geo_info
 
 
+def download_ndvi_series(bbox, date_windows, size=384, on_progress=None):
+    """Download a lightweight NDVI time series across several date windows.
+
+    For each window, picks the least-cloudy Sentinel-2 scene and reads only
+    B04 (red) + B8A (NIR), downsampled to `size`x`size` — enough for area
+    statistics, ~50x less data than full resolution.
+
+    Returns:
+        list of points: {date, cloud_cover, ndvi_mean, ndvi_median, ndvi_p25,
+                         ndvi_p75, ndvi_max}  (windows with no scene are skipped)
+    """
+    from indices import compute_ndvi
+
+    series = []
+    target = (size, size)
+
+    def fetch_window(window):
+        item = search_sentinel2(bbox, window)
+        if item is None:
+            return None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            (red, _, _), (nir, _, _) = pool.map(
+                lambda spec: read_band(item, spec[0], bbox, spec[1], target_size=target),
+                [("B04", 10), ("B8A", 20)],
+            )
+        valid = (red > 0) & (nir > 0)
+        if not valid.any():
+            return None
+        ndvi = compute_ndvi(nir, red)[valid]
+        return {
+            "date": item.properties.get("datetime", window)[:10],
+            "cloud_cover": round(float(item.properties.get("eo:cloud_cover", -1)), 1),
+            "ndvi_mean": round(float(np.mean(ndvi)), 3),
+            "ndvi_median": round(float(np.median(ndvi)), 3),
+            "ndvi_p25": round(float(np.percentile(ndvi, 25)), 3),
+            "ndvi_p75": round(float(np.percentile(ndvi, 75)), 3),
+            "ndvi_max": round(float(np.percentile(ndvi, 98)), 3),
+        }
+
+    # Windows are independent — fetch them concurrently.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(fetch_window, date_windows))
+
+    for window, point in zip(date_windows, results):
+        if on_progress:
+            on_progress(f"{window}: {'ok' if point else 'no scene'}")
+        if point:
+            series.append(point)
+
+    series.sort(key=lambda p: p["date"])
+    return series
+
+
 def download_bands_for_indices(bbox, date_range, on_progress=None):
     """Download bands needed for vegetation indices.
 
@@ -154,19 +210,22 @@ def download_bands_for_indices(bbox, date_range, on_progress=None):
         geo_info: dict
     """
     if on_progress:
-        on_progress(f"Downloading bands for indices...")
+        on_progress("Downloading bands for indices...")
 
     item = search_sentinel2(bbox, date_range)
     if item is None:
         raise ValueError(f"No cloud-free image found for {date_range}")
 
-    blue, _, _ = read_band(item, "B02", bbox, 10)
+    # B02/B03/B04 are native 10 m (shared grid) — read concurrently.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        (blue, _, _), (green, _, _), (red, _, _) = pool.map(
+            lambda b: read_band(item, b, bbox, 10), ["B02", "B03", "B04"]
+        )
+
+    # B8A is native 20 m — resample it onto the 10 m grid.
     target_size = blue.shape
-    green, _, _ = read_band(item, "B03", bbox, 10, target_size=target_size)
-    red, _, _ = read_band(item, "B04", bbox, 10, target_size=target_size)
     nir, win_transform, crs = read_band(item, "B8A", bbox, 20, target_size=target_size)
 
-    blue = _ensure_size(blue, target_size)
     green = _ensure_size(green, target_size)
     red = _ensure_size(red, target_size)
     nir = _ensure_size(nir, target_size)

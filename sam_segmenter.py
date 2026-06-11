@@ -9,15 +9,16 @@ import os
 import numpy as np
 import torch
 from segment_anything import sam_model_registry, SamPredictor
-from pyproj import Transformer
-from rasterio.transform import AffineTransformer
 
 from geo_utils import mask_to_geojson
 
+# Model type and checkpoint are env-configurable. Default to vit_b: it is
+# ~10x smaller than vit_h and encodes in a few seconds on CPU, which keeps
+# the app responsive without a GPU. Override with SAM_MODEL_TYPE / SAM_CHECKPOINT.
+SAM_MODEL_TYPE = os.environ.get("SAM_MODEL_TYPE", "vit_b")
 SAM_CHECKPOINT = os.environ.get("SAM_CHECKPOINT", os.path.expanduser(
-    "~/.cache/torch/hub/checkpoints/sam_vit_h_4b8939.pth"
+    "~/.cache/torch/hub/checkpoints/sam_vit_b_01ec64.pth"
 ))
-SAM_MODEL_TYPE = "vit_h"
 
 
 class SamSegmenter:
@@ -36,10 +37,17 @@ class SamSegmenter:
         if self._loaded:
             return
 
+        if not os.path.exists(SAM_CHECKPOINT):
+            raise FileNotFoundError(
+                f"SAM checkpoint not found: {SAM_CHECKPOINT}. "
+                f"Set SAM_CHECKPOINT to the {SAM_MODEL_TYPE} weights file."
+            )
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
         sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=SAM_CHECKPOINT)
         sam.to(device)
         self.predictor = SamPredictor(sam)
+        self.device = device
         self._loaded = True
 
     def set_image(self, rgb_array, geo_info):

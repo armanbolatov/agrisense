@@ -1,0 +1,104 @@
+# AgriSense GPU stack.
+#
+#   docker compose up -d --wait                      # vllm + agrisense (self-contained)
+#   docker compose --profile terramind up -d --wait  # + the TerraMind crop model
+#
+#   vllm       — OpenAI-compatible LLM server (Qwen) for chat
+#   agrisense  — the web app; GPU SAM + chat via vLLM; crops via TerraMind if present,
+#                else a built-in rule-based classifier
+#   terramind  — (optional, profile) fine-tuned TerraMind crop-classification model.
+#                Built from a sibling ./terramind repo; needs its checkpoint.
+#
+# Requires the NVIDIA Container Toolkit on the host (see README / install-gpu.sh).
+# For a small GPU, drop the model sizes — see "Small GPU" in the README.
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: agrisense-vllm
+    command: >
+      --model ${VLLM_MODEL:-Qwen/Qwen2.5-3B-Instruct}
+      --served-model-name qwen
+      --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.4}
+      --max-model-len 4096
+      --port 8000
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - vllm-cache:/root/.cache/vllm     # persist torch.compile cache across restarts
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      # Generous: a first-time model download (several GB) + engine init can take minutes.
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  agrisense:
+    build: .
+    image: agrisense:latest
+    container_name: agrisense
+    depends_on:
+      vllm:
+        condition: service_healthy
+    ports:
+      - "${AGRISENSE_PORT:-8501}:8000"
+    environment:
+      CHAT_PROVIDER: local
+      LOCAL_LLM_URL: http://vllm:8000/v1
+      LOCAL_LLM_MODEL: qwen
+      SAM_MODEL_TYPE: ${SAM_MODEL_TYPE:-vit_h}
+      SAM_CHECKPOINT: ${SAM_CHECKPOINT:-/models/sam_vit_h_4b8939.pth}
+      # Crop model service — reached if the `terramind` profile is up, else the
+      # app falls back to its rule-based classifier.
+      TERRAMIND_URL: http://terramind:8600
+    volumes:
+      # SAM weights, mounted read-only from the host torch cache.
+      - ${SAM_CHECKPOINT_DIR:-${HOME}/.cache/torch/hub/checkpoints}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  terramind:
+    profiles: ["terramind"]      # only starts with: docker compose --profile terramind up
+    build:
+      context: ../terramind
+    image: agrisense-terramind:latest
+    container_name: agrisense-terramind
+    environment:
+      HF_HOME: /hf
+    volumes:
+      # The 1.6 GB fine-tuned checkpoint, mounted read-only from the host.
+      - ${TERRAMIND_DIR:-../terramind}/output:/app/output:ro
+      - hf-cache-tm:/hf
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8600/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  hf-cache:
+  hf-cache-tm:
+  vllm-cache:

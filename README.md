@@ -6,51 +6,138 @@ Remote sensing analysis platform built on Sentinel-2 satellite data from Microso
 
 - **Satellite Preview** — RGB imagery for any region
 - **NDVI / NDWI / EVI** — Vegetation and water index computation
-- **SAM Segmentation** — Interactive click-to-segment using Segment Anything Model
-- **AI Chat** — Natural language interface with geocoding (type a place name to navigate)
+- **NDVI Time Series** — Seasonal vegetation dynamics (one scene per month) as an interactive **Plotly** chart, with a rule-based phenology interpretation (crop-type hint)
+- **Crop Classification** — Per-pixel crop map. Uses the fine-tuned **TerraMind** multi-temporal model (13 classes, GPU) when its optional service is running, with an automatic fallback to a built-in rule-based seasonal classifier
+- **Season Slider** — Scrub the multi-temporal imagery (Spring / Peak / Late) over the classified map to see the season change
+- **SAM Segmentation** — Interactive click-to-segment using Segment Anything Model (GPU)
+- **AI Chat** — Instruction-tuned LLM (Qwen via vLLM) that reasons over the analysis results; type **any place name worldwide** in the chat to navigate the map there
 - **MCP Server** — Claude Code integration via Model Context Protocol
 
-## Quick Start
+## Quick Start (Docker, recommended)
 
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.11+.
+Requires Docker + an NVIDIA GPU with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+(one-time setup: `sudo ./install-gpu.sh`).
 
 ```bash
 git clone https://github.com/armanbolatov/agrisense.git
 cd agrisense
+docker compose up -d --wait
+```
+
+Open http://localhost:8501 in your browser.
+
+The default `up` brings up a **self-contained** two-container stack:
+
+| Service | What it does |
+|---|---|
+| `vllm` | Serves a Qwen model (OpenAI-compatible API) on the GPU for chat |
+| `agrisense` | The web app; SAM on the GPU, satellite data, indices, rule-based crop map |
+
+**SAM checkpoint** — mount it from the host (read-only). Fetch one once:
+
+```bash
+mkdir -p ~/.cache/torch/hub/checkpoints
+# vit_b (light, 375 MB) — set SAM_MODEL_TYPE=vit_b SAM_CHECKPOINT=/models/sam_vit_b_01ec64.pth
+curl -L -o ~/.cache/torch/hub/checkpoints/sam_vit_b_01ec64.pth \
+  https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+# vit_h (best, 2.4 GB, default) :
+curl -L -o ~/.cache/torch/hub/checkpoints/sam_vit_h_4b8939.pth \
+  https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
+```
+
+Change the chat model: `VLLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct docker compose up -d`.
+
+### TerraMind crop model (optional)
+
+The "Classify crops" button uses the fine-tuned TerraMind multi-temporal model
+(13 classes) when its service is running; otherwise the app uses the built-in
+rule-based classifier — so the base stack works on its own. To enable TerraMind
+you need the sibling `terramind` repo (with its checkpoint under `output/`)
+next to this one, then start with the profile:
+
+```bash
+docker compose --profile terramind up -d --wait
+```
+
+It builds from `../terramind`, bakes the pretrained backbone into the image, and
+mounts the checkpoint read-only from `${TERRAMIND_DIR:-../terramind}/output`.
+
+## Hosting & remote access
+
+Run it on any machine with an NVIDIA GPU + the toolkit. The app binds
+`0.0.0.0:${AGRISENSE_PORT:-8501}`, so it's reachable on the host's network.
+
+- **Same LAN:** others open `http://<host-LAN-IP>:8501`.
+- **Public IP / cloud VM:** open the port in the firewall / security group, then
+  `http://<public-ip>:8501`. Change the port with `AGRISENSE_PORT=80`.
+- **Tunnel (easiest, no firewall changes):**
+  `cloudflared tunnel --url http://localhost:8501` or `ngrok http 8501` → a public
+  HTTPS URL.
+
+⚠️ **The app has no authentication.** Anyone who can reach the port can run
+analyses that use your GPU, the LLM, and Planetary Computer bandwidth. Before
+exposing it publicly, put it behind a reverse proxy with auth (nginx/Caddy basic
+auth, or Cloudflare Access), or restrict the firewall to known IPs. Keep the
+`vllm`/`terramind` ports internal (they are, by default — don't publish them).
+
+### Small GPU
+
+The full default (Qwen-3B + SAM `vit_h` + TerraMind) needs ~20 GB VRAM. For an
+8–16 GB GPU, create a `.env` next to `docker-compose.yml`:
+
+```env
+VLLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+VLLM_GPU_UTIL=0.25
+SAM_MODEL_TYPE=vit_b
+SAM_CHECKPOINT=/models/sam_vit_b_01ec64.pth
+```
+
+and run the default `docker compose up -d` (skip TerraMind). That's ~4 GB VRAM
+(Qwen-0.5B ≈ 2 GB + SAM `vit_b` ≈ 1.5 GB). For no GPU at all, build the CPU image
+(`docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu -t agrisense .`)
+and point chat at a hosted API (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`).
+
+## Quick Start (local, without Docker)
+
+Requires [uv](https://docs.astral.sh/uv/) and Python 3.11+.
+
+```bash
 uv sync              # install dependencies
 ./start.sh           # start with Ollama (default)
 ```
 
-Open http://localhost:8000 in your browser.
-
-### Chat Providers
+Open http://localhost:8000.
 
 ```bash
-./start.sh                                    # Ollama (qwen2.5:3b)
+./start.sh                                     # Ollama (qwen2.5:3b)
 ANTHROPIC_API_KEY=sk-... ./start.sh anthropic  # Anthropic
 OPENAI_API_KEY=sk-... ./start.sh openai        # OpenAI
 ```
 
-Open http://localhost:8000 in your browser.
-
 ## Usage
 
 1. Draw a rectangle on the map or type a region name in the chat (e.g. `taldykorgan`, `pavlodar`)
-2. Click any analysis button: Satellite Preview, NDVI, or SAM Load Area
+2. Click any analysis button: Satellite Preview, NDVI, NDVI Time Series, or SAM Load Area
 3. For SAM: after loading, click on the map to segment objects (green = include, red = exclude)
-4. Ask the AI chat questions about the analysis results
+4. Ask the AI chat questions about the analysis results — e.g. after running a time
+   series: *"When does vegetation peak and what crop type does the profile suggest?"*
 
 ## Architecture
 
 ```
 server.py          FastAPI backend — routes, job system, chat, geocoding
-satellite.py       Sentinel-2 data access via Planetary Computer
-geo_utils.py       Coordinate transforms, raster-to-vector, PNG encoding
-indices.py         NDVI, NDWI, EVI computation
+satellite.py       Sentinel-2 data access via Planetary Computer (parallel band reads)
+geo_utils.py       Coordinate transforms, raster-to-vector, PNG encoding, charts
+indices.py         NDVI, NDWI, EVI computation + phenology heuristics
+cropmap.py         Rule-based seasonal crop classifier (fallback) + season stack
 sam_segmenter.py   SAM wrapper with georeferencing
 mcp_server.py      MCP tools for Claude Code
-static/            Frontend (Leaflet map, dark UI)
-start.sh           Launch script with provider selection
+static/            Frontend (Leaflet map + vendored Leaflet/Plotly, neutral UI)
+docker-compose.yml vllm + agrisense; terramind behind the `terramind` profile
+Dockerfile         App image (CUDA torch by default, TORCH_INDEX arg for CPU)
+../terramind/      Optional TerraMind crop service (separate repo + checkpoint)
+install-gpu.sh     One-time NVIDIA Container Toolkit setup
+start.sh           Local (non-Docker) launch script
 ```
 
 ## Environment Variables
@@ -58,9 +145,16 @@ start.sh           Launch script with provider selection
 | Variable | Description |
 |---|---|
 | `CHAT_PROVIDER` | `local`, `anthropic`, or `openai` |
-| `LOCAL_LLM_URL` | OpenAI-compatible endpoint (default: `http://localhost:11434/v1`) |
-| `LOCAL_LLM_MODEL` | Model name for local LLM (default: `llama3`) |
-| `SAM_CHECKPOINT` | Path to SAM weights (default: `~/.cache/torch/hub/checkpoints/sam_vit_h_4b8939.pth`) |
+| `LOCAL_LLM_URL` | OpenAI-compatible endpoint (Docker default: `http://vllm:8000/v1`) |
+| `LOCAL_LLM_MODEL` | Model name for local LLM (Docker default: `qwen`) |
+| `VLLM_MODEL` | HuggingFace model served by the vLLM container |
+| `VLLM_GPU_UTIL` | Fraction of GPU memory vLLM reserves (default `0.4`; lower for small GPUs) |
+| `AGRISENSE_PORT` | Host port for the web app (default `8501`) |
+| `SAM_MODEL_TYPE` | `vit_h` (default) or `vit_b` (lighter) |
+| `SAM_CHECKPOINT` | In-container path to SAM weights (default `/models/sam_vit_h_4b8939.pth`) |
+| `SAM_CHECKPOINT_DIR` | Host dir mounted to `/models` (default `~/.cache/torch/hub/checkpoints`) |
+| `TERRAMIND_URL` | Crop-model service endpoint (default `http://terramind:8600`) |
+| `TERRAMIND_DIR` | Host path to the terramind repo (for the checkpoint mount) |
 
 ## License
 

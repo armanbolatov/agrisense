@@ -24,10 +24,14 @@ const previewLayer = L.layerGroup().addTo(map);
 const ndviLayer = L.layerGroup().addTo(map);
 const samLayer = L.layerGroup().addTo(map);
 const samPointsLayer = L.layerGroup().addTo(map);
+const cropLayer = L.layerGroup().addTo(map);
+const seasonLayer = L.layerGroup().addTo(map);
 
 const overlayLayers = {
     "Satellite Preview": previewLayer,
     "NDVI": ndviLayer,
+    "Crop Map": cropLayer,
+    "Season (NDVI)": seasonLayer,
     "SAM Segments": samLayer,
     "SAM Points": samPointsLayer,
 };
@@ -57,8 +61,20 @@ let samMode = false;
 let samPoints = [];
 let samLabels = [];
 
+// Clear all analysis overlays + UI so a new selection starts clean.
+function clearResults() {
+    [previewLayer, ndviLayer, cropLayer, seasonLayer, samLayer, samPointsLayer]
+        .forEach(l => l.clearLayers());
+    samMode = false;
+    samPoints = [];
+    samLabels = [];
+    document.getElementById("sam-controls").classList.add("hidden");
+    document.getElementById("season-slider").classList.add("hidden");
+}
+
 map.on(L.Draw.Event.CREATED, function (e) {
-    drawnItems.clearLayers();
+    clearResults();
+    drawnItems.clearLayers();           // only ever one selection rectangle
     drawnItems.addLayer(e.layer);
     const bounds = e.layer.getBounds();
     currentBbox = [
@@ -69,8 +85,8 @@ map.on(L.Draw.Event.CREATED, function (e) {
 });
 
 function setBbox(bbox) {
-    console.log("setBbox called with:", bbox);
     currentBbox = bbox;
+    clearResults();
     drawnItems.clearLayers();
     const bounds = [[bbox[1], bbox[0]], [bbox[3], bbox[2]]];
     console.log("Leaflet bounds:", bounds);
@@ -79,6 +95,7 @@ function setBbox(bbox) {
         weight: 3,
         fillOpacity: 0.15,
         dashArray: "8, 4",
+        interactive: false,
     });
     drawnItems.addLayer(rect);
     map.fitBounds(rect.getBounds(), { padding: [50, 50] });
@@ -132,6 +149,16 @@ document.getElementById("btn-preview").addEventListener("click", () => {
 document.getElementById("btn-ndvi").addEventListener("click", () => {
     if (!currentBbox) return alert("Draw a rectangle on the map first.");
     runJob("ndvi", { bbox: currentBbox, date_ranges: getDateRanges() });
+});
+
+document.getElementById("btn-timeseries").addEventListener("click", () => {
+    if (!currentBbox) return alert("Draw a rectangle on the map first.");
+    runJob("timeseries", { bbox: currentBbox });
+});
+
+document.getElementById("btn-cropmap").addEventListener("click", () => {
+    if (!currentBbox) return alert("Draw a rectangle on the map first.");
+    runJob("cropmap", { bbox: currentBbox });
 });
 
 document.getElementById("btn-sam-load").addEventListener("click", () => {
@@ -307,6 +334,40 @@ function displayResult(data, endpoint) {
         }
     }
 
+    else if (endpoint === "cropmap") {
+        cropLayer.clearLayers();
+        const bounds = [[data.bbox[1], data.bbox[0]], [data.bbox[3], data.bbox[2]]];
+        if (data.class_image) {
+            L.imageOverlay("data:image/png;base64," + data.class_image, bounds, { opacity: 0.8 }).addTo(cropLayer);
+            map.fitBounds(bounds);
+        }
+        // Legend
+        let html = "<b>Crop classification</b>";
+        html += '<div class="crop-legend">';
+        for (const c of data.legend) {
+            html += `<div class="legend-row"><span class="swatch" style="background:${c.color}"></span>` +
+                    `<span class="legend-label">${c.label}</span><span class="legend-pct">${c.percent}%</span></div>`;
+        }
+        html += "</div>";
+        showStats(html);
+
+        setupSeasonSlider(data.monthly, bounds);
+    }
+
+    else if (endpoint === "timeseries") {
+        let html = "<b>NDVI Time Series</b>";
+        html += '<div id="ndvi-plot" style="width:100%;height:200px;margin-top:6px"></div>';
+        if (data.phenology) {
+            const ph = data.phenology;
+            if (ph.peak_date) {
+                html += `<div class="muted small" style="margin-top:4px">Peak ${ph.peak_ndvi} on ${ph.peak_date} &middot; amplitude ${ph.amplitude}</div>`;
+            }
+            html += `<div class="small" style="margin-top:4px">${ph.hint}</div>`;
+        }
+        showStats(html);
+        renderNdviPlot(data.series || []);
+    }
+
     else if (endpoint === "sam/load") {
         // SAM area loaded — enable click mode
         previewLayer.clearLayers();
@@ -355,6 +416,74 @@ function showStats(html) {
     document.getElementById("stats-display").innerHTML = html;
 }
 
+// Interactive NDVI time-series chart (Plotly): mean line + 25-75% band, hover values.
+function renderNdviPlot(series) {
+    if (!window.Plotly || !series.length) return;
+    const x = series.map(p => p.date);
+    const mean = series.map(p => p.ndvi_mean);
+    const p25 = series.map(p => p.ndvi_p25 ?? p.ndvi_mean);
+    const p75 = series.map(p => p.ndvi_p75 ?? p.ndvi_mean);
+
+    const band = {
+        x: x.concat([...x].reverse()),
+        y: p75.concat([...p25].reverse()),
+        fill: "toself", fillcolor: "rgba(22,163,74,0.15)",
+        line: { color: "transparent" }, hoverinfo: "skip",
+        showlegend: false, name: "25–75%",
+    };
+    const line = {
+        x, y: mean, mode: "lines+markers", name: "mean NDVI",
+        line: { color: "#16a34a", width: 2 }, marker: { size: 6 },
+        hovertemplate: "%{x}<br>NDVI %{y:.3f}<extra></extra>",
+    };
+    const layout = {
+        margin: { l: 34, r: 8, t: 6, b: 28 },
+        height: 200,
+        yaxis: { range: [-0.1, 1.0], gridcolor: "#eee", zeroline: false, tickfont: { size: 9 } },
+        xaxis: { gridcolor: "#eee", tickfont: { size: 9 } },
+        font: { size: 10, color: "#18181b" },
+        paper_bgcolor: "white", plot_bgcolor: "white", showlegend: false,
+        hoverlabel: { bgcolor: "#18181b", font: { color: "#fff", size: 11 } },
+    };
+    Plotly.newPlot("ndvi-plot", [band, line], layout,
+        { responsive: true, displaylogo: false, displayModeBar: false });
+}
+
+// ============================
+// SEASON SLIDER
+// ============================
+
+let seasonFrames = [];   // [{month, layer}]
+
+function setupSeasonSlider(monthly, bounds) {
+    seasonLayer.clearLayers();
+    seasonFrames = (monthly || []).map(m => ({
+        month: m.month,
+        layer: L.imageOverlay("data:image/png;base64," + m.image, bounds, { opacity: 0.85 }),
+    }));
+
+    const panel = document.getElementById("season-slider");
+    const range = document.getElementById("season-range");
+    const label = document.getElementById("slider-month");
+
+    if (seasonFrames.length === 0) { panel.classList.add("hidden"); return; }
+
+    range.min = 0;
+    range.max = seasonFrames.length - 1;
+    range.value = seasonFrames.length - 1;  // start at latest month
+    panel.classList.remove("hidden");
+
+    const showFrame = (i) => {
+        seasonLayer.clearLayers();
+        seasonFrames[i].layer.addTo(seasonLayer);
+        label.textContent = seasonFrames[i].month;
+    };
+    // Default view is the crop classification (the headline result); the
+    // season NDVI overlay only appears once the user scrubs the slider.
+    label.textContent = seasonFrames[seasonFrames.length - 1].month + " — drag to view";
+    range.oninput = () => showFrame(parseInt(range.value, 10));
+}
+
 // ============================
 // CHAT
 // ============================
@@ -393,23 +522,10 @@ async function sendChat() {
     chatInput.value = "";
     chatSend.disabled = true;
 
-    // Always try geocoding first — if the message mentions a place, select it
-    try {
-        const geoResp = await fetch("/api/geocode", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query: msg }),
-        });
-        const geo = await geoResp.json();
-        if (geo.found) {
-            setBbox(geo.bbox);
-            appendChat("assistant", `Selected ${geo.name}. You can now run any analysis tool.`);
-            chatSend.disabled = false;
-            return;
-        }
-    } catch (err) {
-        // Geocoding failed, fall through to regular chat
-    }
+    // Show a "thinking" bubble so the wait doesn't look frozen, then replace
+    // its text when the reply arrives.
+    const thinking = appendChat("assistant", "•••");
+    thinking.classList.add("thinking");
 
     try {
         const resp = await fetch("/api/chat", {
@@ -422,12 +538,19 @@ async function sendChat() {
             }),
         });
         const data = await resp.json();
-        appendChat("assistant", data.response);
+        thinking.classList.remove("thinking");
+        thinking.textContent = data.response;
+
+        // The backend resolves navigation commands ("go to X") and bare place
+        // names, returning a bbox — move the map there if so.
+        if (data.bbox) setBbox(data.bbox);
     } catch (err) {
-        appendChat("assistant", "Connection error: " + err.message);
+        thinking.classList.remove("thinking");
+        thinking.textContent = "Connection error: " + err.message;
     }
 
     chatSend.disabled = false;
+    chatInput.focus();
 }
 
 function appendChat(role, text) {
@@ -436,4 +559,5 @@ function appendChat(role, text) {
     div.textContent = text;
     chatMessages.appendChild(div);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+    return div;
 }

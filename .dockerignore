@@ -1,0 +1,13 @@
+# Keep the build context small and the image clean.
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.git
+.gitignore
+workspace
+demo
+uv.lock
+.python-version
+.mcp.json
+*.log

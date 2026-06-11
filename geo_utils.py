@@ -1,34 +1,15 @@
-"""Geospatial utilities: tiling, coordinate transforms, raster-to-vector conversion."""
+"""Geospatial utilities: raster-to-vector conversion and PNG/chart rendering."""
 
 import io
 import base64
 import numpy as np
-import rasterio
 from rasterio.features import shapes as rasterio_shapes
-from rasterio.transform import from_bounds
 from pyproj import Transformer
 from shapely.geometry import shape, mapping
 from shapely.ops import unary_union
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap, BoundaryNorm
-
-
-def lonlat_to_pixel(lon, lat, transform, crs):
-    """Convert lon/lat (EPSG:4326) to pixel coordinates."""
-    t = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-    x, y = t.transform(lon, lat)
-    col, row = ~transform * (x, y)
-    return int(round(col)), int(round(row))
-
-
-def pixel_to_lonlat(col, row, transform, crs):
-    """Convert pixel coordinates to lon/lat (EPSG:4326)."""
-    x, y = transform * (col, row)
-    t = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
-    lon, lat = t.transform(x, y)
-    return lon, lat
 
 
 def mask_to_geojson(mask, transform, crs):
@@ -112,30 +93,3 @@ def rgb_to_png(rgb_array):
     plt.imsave(buf, rgb_array, format="png")
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("utf-8")
-
-
-def write_geotiff(band_array, bbox, output_path, crs="EPSG:4326"):
-    """Write band array as a GeoTIFF file.
-
-    Args:
-        band_array: [C, H, W] or [H, W] numpy array
-        bbox: [west, south, east, north]
-        output_path: output file path
-        crs: coordinate reference system
-    """
-    if band_array.ndim == 2:
-        band_array = band_array[np.newaxis, :, :]
-
-    c, h, w = band_array.shape
-    transform = from_bounds(bbox[0], bbox[1], bbox[2], bbox[3], w, h)
-
-    with rasterio.open(
-        output_path, "w",
-        driver="GTiff",
-        height=h, width=w, count=c,
-        dtype=band_array.dtype,
-        crs=crs,
-        transform=transform,
-    ) as dst:
-        for i in range(c):
-            dst.write(band_array[i], i + 1)

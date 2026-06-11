@@ -30,6 +30,39 @@ def compute_evi(nir, red, blue):
     return 2.5 * (nir - red) / (denom + 1e-10)
 
 
+def describe_phenology(series):
+    """Rule-based interpretation of an NDVI time series (list of points with
+    'date' and 'ndvi_mean'). Returns a dict with peak info and a crop-type
+    hint based on simple phenology heuristics for northern-hemisphere crops.
+    """
+    if len(series) < 2:
+        return {"hint": "Not enough cloud-free scenes for a temporal profile."}
+
+    values = [p["ndvi_mean"] for p in series]
+    peak_idx = int(np.argmax(values))
+    peak = series[peak_idx]
+    peak_month = int(peak["date"][5:7])
+    amplitude = round(max(values) - min(values), 3)
+
+    if max(values) < 0.25:
+        hint = "Consistently low NDVI — likely bare soil, fallow land, or water."
+    elif amplitude < 0.15:
+        hint = "High but flat NDVI — likely permanent vegetation (grassland or forest), not an annual crop."
+    elif peak_month <= 6:
+        hint = "Early-season peak (May–June) — consistent with winter crops (e.g. winter wheat)."
+    elif peak_month <= 8:
+        hint = "Mid-summer peak (July–August) — consistent with spring-sown crops (e.g. spring wheat, corn, sunflower)."
+    else:
+        hint = "Late-season peak — possibly a late crop or regrowth after harvest."
+
+    return {
+        "peak_date": peak["date"],
+        "peak_ndvi": peak["ndvi_mean"],
+        "amplitude": amplitude,
+        "hint": hint,
+    }
+
+
 def compute_all_indices(bands):
     """Compute all vegetation indices from band dict.
 
