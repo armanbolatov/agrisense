@@ -1,0 +1,15 @@
+# Reverse proxy for AgriSense: HTTPS + HTTP basic auth.
+#
+# DOMAIN=localhost           -> Caddy serves internal (self-signed) TLS
+# DOMAIN=agrisense.example   -> Caddy auto-provisions a Let's Encrypt cert
+#
+# Generate the password hash with:
+#   docker run --rm caddy:2-alpine caddy hash-password --plaintext 'yourpassword'
+# then set BASIC_AUTH_USER / BASIC_AUTH_HASH (see docker-compose.yml).
+
+{$DOMAIN:localhost} {
+	basic_auth {
+		{$BASIC_AUTH_USER:admin} {$BASIC_AUTH_HASH}
+	}
+	reverse_proxy agrisense:8000
+}

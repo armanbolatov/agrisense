@@ -6,11 +6,15 @@ Remote sensing analysis platform built on Sentinel-2 satellite data from Microso
 
 - **Satellite Preview** — RGB imagery for any region
 - **NDVI / NDWI / EVI** — Vegetation and water index computation
-- **NDVI Time Series** — Seasonal vegetation dynamics (one scene per month) as an interactive **Plotly** chart, with a rule-based phenology interpretation (crop-type hint)
+- **NDVI Time Series** — Seasonal vegetation dynamics (one scene per month) as an interactive **Plotly** chart (NDVI + toggleable NDWI/EVI), with a rule-based phenology interpretation (crop-type hint)
 - **Crop Classification** — Per-pixel crop map. Uses the fine-tuned **TerraMind** multi-temporal model (13 classes, GPU) when its optional service is running, with an automatic fallback to a built-in rule-based seasonal classifier
 - **Season Slider** — Scrub the multi-temporal imagery (Spring / Peak / Late) over the classified map to see the season change
+- **Change Detection** — NDVI difference between two years' peak seasons (greener / browner map + stats)
 - **SAM Segmentation** — Interactive click-to-segment using Segment Anything Model (GPU)
-- **AI Chat** — Instruction-tuned LLM (Qwen via vLLM) that reasons over the analysis results; type **any place name worldwide** in the chat to navigate the map there
+- **Any year** — pick the analysis year (2018–2024); all tools use it
+- **Export** — download results as **GeoTIFF** (NDVI / crop map / change), **CSV** (time series), or **GeoJSON** (SAM segments)
+- **AI Chat (agentic)** — an instruction-tuned **Qwen3** (via vLLM) that *runs analyses on command* ("classify crops in Pavlodar", "show NDVI time series"), navigates to **any place worldwide** (with a Kazakhstan preference), interprets results, explains how the tools work, and answers general questions — streamed token-by-token
+- **Result caching** — re-running an analysis on the same area + dates is instant (no re-download); the preset regions are pre-cached at startup
 - **MCP Server** — Claude Code integration via Model Context Protocol
 
 ## Quick Start (Docker, recommended)
@@ -30,7 +34,7 @@ The default `up` brings up a **self-contained** two-container stack:
 
 | Service | What it does |
 |---|---|
-| `vllm` | Serves a Qwen model (OpenAI-compatible API) on the GPU for chat |
+| `vllm` | Serves **Qwen3-4B-Instruct** (OpenAI-compatible API) on the GPU for chat |
 | `agrisense` | The web app; SAM on the GPU, satellite data, indices, rule-based crop map |
 
 **SAM checkpoint** — mount it from the host (read-only). Fetch one once:
@@ -45,7 +49,8 @@ curl -L -o ~/.cache/torch/hub/checkpoints/sam_vit_h_4b8939.pth \
   https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
 ```
 
-Change the chat model: `VLLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct docker compose up -d`.
+Change the chat model: `VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct docker compose up -d vllm`
+(default is `Qwen/Qwen3-4B-Instruct-2507`).
 
 ### TerraMind crop model (optional)
 
@@ -82,7 +87,7 @@ auth, or Cloudflare Access), or restrict the firewall to known IPs. Keep the
 
 ### Small GPU
 
-The full default (Qwen-3B + SAM `vit_h` + TerraMind) needs ~20 GB VRAM. For an
+The full default (Qwen3-4B + SAM `vit_h` + TerraMind) needs ~22 GB VRAM. For an
 8–16 GB GPU, create a `.env` next to `docker-compose.yml`:
 
 ```env

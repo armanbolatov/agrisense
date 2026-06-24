@@ -122,6 +122,21 @@ input[type="date"]:focus, #chat-input:focus { outline: none; border-color: var(-
 
 /* ---------- Presets ---------- */
 
+.select {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 8px; font-size: 12px; background: var(--bg); color: var(--fg);
+}
+.year-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.year-row .select { flex: 1; }
+.change-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+.change-row .select { flex: 1; }
+.export-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.export-links a {
+    font-size: 11px; color: var(--fg); text-decoration: none;
+    border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px;
+}
+.export-links a:hover { background: var(--muted); }
+
 .preset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .preset-btn {
     height: 32px; font-size: 12px; font-weight: 500;

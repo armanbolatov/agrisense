@@ -93,3 +93,34 @@ def rgb_to_png(rgb_array):
     plt.imsave(buf, rgb_array, format="png")
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("utf-8")
+
+
+def diff_to_colored_png(diff, vlim=0.4):
+    """Diverging colored PNG for a change map (e.g. NDVI difference).
+    Blue/green = increase, red = decrease, white ≈ no change; nodata transparent.
+    """
+    cmap = plt.get_cmap("RdYlGn")
+    normalized = np.clip((diff + vlim) / (2 * vlim + 1e-10), 0, 1)
+    colored = (cmap(normalized) * 255).astype(np.uint8)
+    colored[np.isnan(diff)] = [0, 0, 0, 0]
+    buf = io.BytesIO()
+    plt.imsave(buf, colored, format="png")
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode("utf-8")
+
+
+def write_geotiff_bytes(array, bbox, crs="EPSG:4326"):
+    """Serialize a [H,W] (or [C,H,W]) array as a georeferenced GeoTIFF (bytes)."""
+    from rasterio.transform import from_bounds
+    from rasterio.io import MemoryFile
+
+    if array.ndim == 2:
+        array = array[np.newaxis, :, :]
+    c, h, w = array.shape
+    transform = from_bounds(bbox[0], bbox[1], bbox[2], bbox[3], w, h)
+    with MemoryFile() as mem:
+        with mem.open(driver="GTiff", height=h, width=w, count=c,
+                      dtype=array.dtype, crs=crs, transform=transform) as dst:
+            for i in range(c):
+                dst.write(array[i], i + 1)
+        return mem.read()

@@ -150,17 +150,16 @@ def download_rgb(bbox, date_range, on_progress=None):
 
 
 def download_ndvi_series(bbox, date_windows, size=384, on_progress=None):
-    """Download a lightweight NDVI time series across several date windows.
+    """Download a lightweight NDVI/NDWI/EVI time series across date windows.
 
-    For each window, picks the least-cloudy Sentinel-2 scene and reads only
-    B04 (red) + B8A (NIR), downsampled to `size`x`size` — enough for area
-    statistics, ~50x less data than full resolution.
+    For each window, picks the least-cloudy Sentinel-2 scene and reads B02/B03/
+    B04/B8A downsampled to `size`x`size` — enough for area statistics.
 
     Returns:
-        list of points: {date, cloud_cover, ndvi_mean, ndvi_median, ndvi_p25,
-                         ndvi_p75, ndvi_max}  (windows with no scene are skipped)
+        list of points: {date, cloud_cover, ndvi_mean/median/p25/p75/max,
+                         ndwi_mean, evi_mean}  (windows with no scene skipped)
     """
-    from indices import compute_ndvi
+    from indices import compute_ndvi, compute_ndwi, compute_evi
 
     series = []
     target = (size, size)
@@ -169,15 +168,17 @@ def download_ndvi_series(bbox, date_windows, size=384, on_progress=None):
         item = search_sentinel2(bbox, window)
         if item is None:
             return None
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            (red, _, _), (nir, _, _) = pool.map(
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            (blue, _, _), (green, _, _), (red, _, _), (nir, _, _) = pool.map(
                 lambda spec: read_band(item, spec[0], bbox, spec[1], target_size=target),
-                [("B04", 10), ("B8A", 20)],
+                [("B02", 10), ("B03", 10), ("B04", 10), ("B8A", 20)],
             )
         valid = (red > 0) & (nir > 0)
         if not valid.any():
             return None
         ndvi = compute_ndvi(nir, red)[valid]
+        ndwi = compute_ndwi(green, nir)[valid]
+        evi = np.clip(compute_evi(nir, red, blue)[valid], -1, 1)
         return {
             "date": item.properties.get("datetime", window)[:10],
             "cloud_cover": round(float(item.properties.get("eo:cloud_cover", -1)), 1),
@@ -186,6 +187,8 @@ def download_ndvi_series(bbox, date_windows, size=384, on_progress=None):
             "ndvi_p25": round(float(np.percentile(ndvi, 25)), 3),
             "ndvi_p75": round(float(np.percentile(ndvi, 75)), 3),
             "ndvi_max": round(float(np.percentile(ndvi, 98)), 3),
+            "ndwi_mean": round(float(np.mean(ndwi)), 3),
+            "evi_mean": round(float(np.mean(evi)), 3),
         }
 
     # Windows are independent — fetch them concurrently.

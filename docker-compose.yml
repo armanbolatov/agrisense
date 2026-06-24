@@ -17,7 +17,7 @@ services:
     image: vllm/vllm-openai:latest
     container_name: agrisense-vllm
     command: >
-      --model ${VLLM_MODEL:-Qwen/Qwen2.5-3B-Instruct}
+      --model ${VLLM_MODEL:-Qwen/Qwen3-4B-Instruct-2507}
       --served-model-name qwen
       --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.4}
       --max-model-len 4096
@@ -98,7 +98,28 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
 
+  proxy:
+    profiles: ["proxy"]      # docker compose --profile proxy up  → HTTPS + basic auth
+    image: caddy:2-alpine
+    container_name: agrisense-proxy
+    depends_on:
+      - agrisense
+    ports:
+      - "${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_HTTPS_PORT:-443}:443"
+    environment:
+      # DOMAIN=localhost → self-signed TLS; a real domain → automatic Let's Encrypt.
+      DOMAIN: ${DOMAIN:-localhost}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:-admin}
+      # Default password is "agrisense" — CHANGE IT (caddy hash-password).
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:-$$2a$$14$$O7.akGTAnj2yPF.UjXUyJOlMq2h.PxZYIhwtL47O1N7lJczFhC9T.}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    restart: unless-stopped
+
 volumes:
   hf-cache:
   hf-cache-tm:
   vllm-cache:
+  caddy-data:

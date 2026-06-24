@@ -26,12 +26,14 @@ const samLayer = L.layerGroup().addTo(map);
 const samPointsLayer = L.layerGroup().addTo(map);
 const cropLayer = L.layerGroup().addTo(map);
 const seasonLayer = L.layerGroup().addTo(map);
+const changeLayer = L.layerGroup().addTo(map);
 
 const overlayLayers = {
     "Satellite Preview": previewLayer,
     "NDVI": ndviLayer,
     "Crop Map": cropLayer,
     "Season (NDVI)": seasonLayer,
+    "Change": changeLayer,
     "SAM Segments": samLayer,
     "SAM Points": samPointsLayer,
 };
@@ -63,7 +65,7 @@ let samLabels = [];
 
 // Clear all analysis overlays + UI so a new selection starts clean.
 function clearResults() {
-    [previewLayer, ndviLayer, cropLayer, seasonLayer, samLayer, samPointsLayer]
+    [previewLayer, ndviLayer, cropLayer, seasonLayer, changeLayer, samLayer, samPointsLayer]
         .forEach(l => l.clearLayers());
     samMode = false;
     samPoints = [];
@@ -130,8 +132,30 @@ fetch("/api/presets")
     });
 
 // ============================
-// TOOL BUTTONS
+// YEAR + TOOL BUTTONS
 // ============================
+
+const yearSelect = document.getElementById("year-select");
+const changeYearA = document.getElementById("change-year-a");
+const changeYearB = document.getElementById("change-year-b");
+for (let y = 2024; y >= 2018; y--) {
+    yearSelect.add(new Option(y, y, y === 2023, y === 2023));
+    changeYearB.add(new Option(y, y, y === 2023, y === 2023));
+    changeYearA.add(new Option(y, y, y === 2020, y === 2020));
+}
+
+function getYear() { return parseInt(yearSelect.value, 10); }
+
+// Keep the season date inputs in sync with the chosen year (month/day fixed).
+function syncDatesToYear() {
+    const y = getYear();
+    [["date-spring-start", "04-20"], ["date-spring-end", "05-31"],
+     ["date-peak-start", "07-01"], ["date-peak-end", "07-31"],
+     ["date-late-start", "09-01"], ["date-late-end", "09-30"]].forEach(([id, md]) => {
+        document.getElementById(id).value = `${y}-${md}`;
+    });
+}
+yearSelect.addEventListener("change", syncDatesToYear);
 
 function getDateRanges() {
     return [
@@ -141,34 +165,27 @@ function getDateRanges() {
     ];
 }
 
-document.getElementById("btn-preview").addEventListener("click", () => {
-    if (!currentBbox) return alert("Draw a rectangle on the map first.");
-    runJob("satellite-preview", { bbox: currentBbox, date_ranges: getDateRanges() });
-});
-
-document.getElementById("btn-ndvi").addEventListener("click", () => {
-    if (!currentBbox) return alert("Draw a rectangle on the map first.");
-    runJob("ndvi", { bbox: currentBbox, date_ranges: getDateRanges() });
-});
-
-document.getElementById("btn-timeseries").addEventListener("click", () => {
-    if (!currentBbox) return alert("Draw a rectangle on the map first.");
-    runJob("timeseries", { bbox: currentBbox });
-});
-
-document.getElementById("btn-cropmap").addEventListener("click", () => {
-    if (!currentBbox) return alert("Draw a rectangle on the map first.");
-    runJob("cropmap", { bbox: currentBbox });
-});
-
-document.getElementById("btn-sam-load").addEventListener("click", () => {
-    if (!currentBbox) return alert("Draw a rectangle on the map first.");
-    const dateRanges = getDateRanges();
-    runJob("sam/load", {
+// Single entry point — the chat can call this too (agentic chat).
+function runAnalysis(tool) {
+    if (!currentBbox) { alert("Select an area on the map first (draw a rectangle or pick a region)."); return; }
+    if (tool === "preview") runJob("satellite-preview", { bbox: currentBbox, date_ranges: getDateRanges() });
+    else if (tool === "ndvi") runJob("ndvi", { bbox: currentBbox, date_ranges: getDateRanges() });
+    else if (tool === "timeseries") runJob("timeseries", { bbox: currentBbox, year: getYear() });
+    else if (tool === "cropmap") runJob("cropmap", { bbox: currentBbox, year: getYear() });
+    else if (tool === "sam") runJob("sam/load", { bbox: currentBbox, date_range: getDateRanges()[1] });
+    else if (tool === "change") runJob("change", {
         bbox: currentBbox,
-        date_range: dateRanges[1], // peak season
+        year_a: parseInt(changeYearA.value, 10),
+        year_b: parseInt(changeYearB.value, 10),
     });
-});
+}
+
+document.getElementById("btn-preview").addEventListener("click", () => runAnalysis("preview"));
+document.getElementById("btn-ndvi").addEventListener("click", () => runAnalysis("ndvi"));
+document.getElementById("btn-timeseries").addEventListener("click", () => runAnalysis("timeseries"));
+document.getElementById("btn-cropmap").addEventListener("click", () => runAnalysis("cropmap"));
+document.getElementById("btn-sam-load").addEventListener("click", () => runAnalysis("sam"));
+document.getElementById("btn-change").addEventListener("click", () => runAnalysis("change"));
 
 document.getElementById("btn-sam-clear").addEventListener("click", () => {
     samPoints = [];
@@ -216,6 +233,7 @@ map.on("click", async function (e) {
                     fillOpacity: 0.25,
                 },
             }).addTo(samLayer);
+            lastSamGeojson = data.geojson;
 
             // Show area info
             const areaPx = data.area_pixels;
@@ -227,6 +245,7 @@ map.on("click", async function (e) {
                     Confidence: ${(score * 100).toFixed(1)}%<br>
                     Points: ${samPoints.length} (${samLabels.filter(l=>l===1).length} fg, ${samLabels.filter(l=>l===0).length} bg)
                 </div>
+                <div class="export-links"><a href="#" onclick="exportSamGeojson();return false">⬇ GeoJSON</a></div>
             `);
         }
     } catch (err) {
@@ -349,14 +368,35 @@ function displayResult(data, endpoint) {
                     `<span class="legend-label">${c.label}</span><span class="legend-pct">${c.percent}%</span></div>`;
         }
         html += "</div>";
+        html += geotiffLink("cropmap");
         showStats(html);
 
         setupSeasonSlider(data.monthly, bounds);
     }
 
+    else if (endpoint === "change") {
+        changeLayer.clearLayers();
+        const bounds = [[data.bbox[1], data.bbox[0]], [data.bbox[3], data.bbox[2]]];
+        if (data.overlay_image) {
+            L.imageOverlay("data:image/png;base64," + data.overlay_image, bounds, { opacity: 0.8 }).addTo(changeLayer);
+            map.fitBounds(bounds);
+        }
+        const s = data.stats || {};
+        let html = `<b>Change ${data.year_a} → ${data.year_b}</b>`;
+        html += '<div class="ndvi-stats">';
+        html += `<div class="ndvi-stat"><div class="value" style="color:#16a34a">${s.greener_pct ?? 0}%</div><div class="label">greener</div></div>`;
+        html += `<div class="ndvi-stat"><div class="value" style="color:#dc2626">${s.browner_pct ?? 0}%</div><div class="label">browner</div></div>`;
+        html += `<div class="ndvi-stat"><div class="value">${s.mean_change ?? 0}</div><div class="label">Δ NDVI</div></div>`;
+        html += "</div>";
+        html += '<div class="small muted" style="margin-top:6px">Green = NDVI increase, red = decrease (peak season).</div>';
+        html += geotiffLink("change");
+        showStats(html);
+    }
+
     else if (endpoint === "timeseries") {
+        lastSeries = data.series || [];
         let html = "<b>NDVI Time Series</b>";
-        html += '<div id="ndvi-plot" style="width:100%;height:200px;margin-top:6px"></div>';
+        html += '<div id="ndvi-plot" style="width:100%;height:210px;margin-top:6px"></div>';
         if (data.phenology) {
             const ph = data.phenology;
             if (ph.peak_date) {
@@ -364,8 +404,9 @@ function displayResult(data, endpoint) {
             }
             html += `<div class="small" style="margin-top:4px">${ph.hint}</div>`;
         }
+        html += '<div class="export-links"><a href="#" onclick="exportSeriesCsv();return false">⬇ CSV</a></div>';
         showStats(html);
-        renderNdviPlot(data.series || []);
+        renderNdviPlot(lastSeries);
     }
 
     else if (endpoint === "sam/load") {
@@ -408,6 +449,7 @@ function displayNdviStats(stats, indices) {
         }
         html += "</div>";
     }
+    html += geotiffLink("ndvi");
 
     showStats(html);
 }
@@ -416,36 +458,88 @@ function showStats(html) {
     document.getElementById("stats-display").innerHTML = html;
 }
 
-// Interactive NDVI time-series chart (Plotly): mean line + 25-75% band, hover values.
+// ============================
+// EXPORT
+// ============================
+
+let lastSeries = null;
+let lastSamGeojson = null;
+
+function downloadFile(filename, content, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+window.exportSeriesCsv = () => {
+    if (!lastSeries) return;
+    const cols = ["date", "cloud_cover", "ndvi_mean", "ndvi_median", "ndvi_p25",
+                  "ndvi_p75", "ndvi_max", "ndwi_mean", "evi_mean"];
+    const rows = [cols.join(",")];
+    lastSeries.forEach(p => rows.push(cols.map(c => p[c] ?? "").join(",")));
+    downloadFile("ndvi_timeseries.csv", rows.join("\n"), "text/csv");
+};
+
+window.exportSamGeojson = () => {
+    if (lastSamGeojson) downloadFile("sam_segment.geojson", JSON.stringify(lastSamGeojson, null, 2), "application/geo+json");
+};
+
+function geotiffLink(kind) {
+    return `<div class="export-links"><a href="/api/export/${kind}.tif">⬇ GeoTIFF</a></div>`;
+}
+
+// Interactive time-series chart (Plotly): NDVI (mean + 25–75% band) plus
+// NDWI and EVI traces you can toggle via the legend.
 function renderNdviPlot(series) {
     if (!window.Plotly || !series.length) return;
     const x = series.map(p => p.date);
-    const mean = series.map(p => p.ndvi_mean);
+    const ndvi = series.map(p => p.ndvi_mean);
     const p25 = series.map(p => p.ndvi_p25 ?? p.ndvi_mean);
     const p75 = series.map(p => p.ndvi_p75 ?? p.ndvi_mean);
 
-    const band = {
-        x: x.concat([...x].reverse()),
-        y: p75.concat([...p25].reverse()),
-        fill: "toself", fillcolor: "rgba(22,163,74,0.15)",
-        line: { color: "transparent" }, hoverinfo: "skip",
-        showlegend: false, name: "25–75%",
-    };
-    const line = {
-        x, y: mean, mode: "lines+markers", name: "mean NDVI",
-        line: { color: "#16a34a", width: 2 }, marker: { size: 6 },
-        hovertemplate: "%{x}<br>NDVI %{y:.3f}<extra></extra>",
-    };
+    const traces = [
+        {   // 25–75% NDVI band
+            x: x.concat([...x].reverse()),
+            y: p75.concat([...p25].reverse()),
+            fill: "toself", fillcolor: "rgba(22,163,74,0.13)",
+            line: { color: "transparent" }, hoverinfo: "skip", showlegend: false,
+        },
+        {
+            x, y: ndvi, mode: "lines+markers", name: "NDVI",
+            line: { color: "#16a34a", width: 2 }, marker: { size: 6 },
+            hovertemplate: "%{x}<br>NDVI %{y:.3f}<extra></extra>",
+        },
+    ];
+    if (series[0].ndwi_mean !== undefined) {
+        traces.push({
+            x, y: series.map(p => p.ndwi_mean), mode: "lines+markers", name: "NDWI",
+            line: { color: "#1f6feb", width: 1.5 }, marker: { size: 4 },
+            visible: "legendonly",
+            hovertemplate: "%{x}<br>NDWI %{y:.3f}<extra></extra>",
+        });
+    }
+    if (series[0].evi_mean !== undefined) {
+        traces.push({
+            x, y: series.map(p => p.evi_mean), mode: "lines+markers", name: "EVI",
+            line: { color: "#e8590c", width: 1.5 }, marker: { size: 4 },
+            visible: "legendonly",
+            hovertemplate: "%{x}<br>EVI %{y:.3f}<extra></extra>",
+        });
+    }
     const layout = {
-        margin: { l: 34, r: 8, t: 6, b: 28 },
-        height: 200,
-        yaxis: { range: [-0.1, 1.0], gridcolor: "#eee", zeroline: false, tickfont: { size: 9 } },
+        margin: { l: 34, r: 8, t: 6, b: 20 },
+        height: 210,
+        yaxis: { range: [-0.4, 1.0], gridcolor: "#eee", zeroline: false, tickfont: { size: 9 } },
         xaxis: { gridcolor: "#eee", tickfont: { size: 9 } },
         font: { size: 10, color: "#18181b" },
-        paper_bgcolor: "white", plot_bgcolor: "white", showlegend: false,
+        paper_bgcolor: "white", plot_bgcolor: "white",
+        showlegend: true,
+        legend: { orientation: "h", y: -0.18, font: { size: 10 } },
         hoverlabel: { bgcolor: "#18181b", font: { color: "#fff", size: 11 } },
     };
-    Plotly.newPlot("ndvi-plot", [band, line], layout,
+    Plotly.newPlot("ndvi-plot", traces, layout,
         { responsive: true, displaylogo: false, displayModeBar: false });
 }
 
@@ -514,6 +608,12 @@ chatInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") sendChat();
 });
 
+// Apply a nav/action result: move the map and/or run an analysis tool.
+function applyChatMeta(d) {
+    if (d.bbox) setBbox(d.bbox);
+    if (d.action) setTimeout(() => runAnalysis(d.action), 250);
+}
+
 async function sendChat() {
     const msg = chatInput.value.trim();
     if (!msg) return;
@@ -522,31 +622,56 @@ async function sendChat() {
     chatInput.value = "";
     chatSend.disabled = true;
 
-    // Show a "thinking" bubble so the wait doesn't look frozen, then replace
-    // its text when the reply arrives.
-    const thinking = appendChat("assistant", "•••");
-    thinking.classList.add("thinking");
+    const bubble = appendChat("assistant", "•••");
+    bubble.classList.add("thinking");
+    const body = JSON.stringify({ message: msg, bbox: currentBbox, session_id: "default" });
 
     try {
-        const resp = await fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                message: msg,
-                bbox: currentBbox,
-                session_id: "default",
-            }),
+        const resp = await fetch("/api/chat/stream", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body,
         });
-        const data = await resp.json();
-        thinking.classList.remove("thinking");
-        thinking.textContent = data.response;
+        if (!resp.ok || !resp.body) throw new Error("stream unavailable");
 
-        // The backend resolves navigation commands ("go to X") and bare place
-        // names, returning a bbox — move the map there if so.
-        if (data.bbox) setBbox(data.bbox);
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "", text = "", streaming = false;
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const parts = buf.split("\n\n");
+            buf = parts.pop();
+            for (const part of parts) {
+                const line = part.trim();
+                if (!line.startsWith("data:")) continue;
+                let ev;
+                try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
+                if (ev.type === "meta") {
+                    bubble.classList.remove("thinking");
+                    bubble.textContent = ev.response || "";
+                    applyChatMeta(ev);
+                } else if (ev.type === "token") {
+                    if (!streaming) { bubble.classList.remove("thinking"); bubble.textContent = ""; streaming = true; }
+                    text += ev.t;
+                    bubble.textContent = text;
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+            }
+        }
+        if (bubble.classList.contains("thinking")) { bubble.classList.remove("thinking"); bubble.textContent = text || "…"; }
     } catch (err) {
-        thinking.classList.remove("thinking");
-        thinking.textContent = "Connection error: " + err.message;
+        // Fall back to the non-streaming endpoint.
+        try {
+            const r = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+            const data = await r.json();
+            bubble.classList.remove("thinking");
+            bubble.textContent = data.response;
+            applyChatMeta(data);
+        } catch (e2) {
+            bubble.classList.remove("thinking");
+            bubble.textContent = "Connection error: " + e2.message;
+        }
     }
 
     chatSend.disabled = false;

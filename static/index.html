@@ -6,7 +6,7 @@
     <title>AgriSense</title>
     <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css" />
     <link rel="stylesheet" href="/static/vendor/leaflet-draw/leaflet.draw.css" />
-    <link rel="stylesheet" href="/static/style.css?v=4" />
+    <link rel="stylesheet" href="/static/style.css?v=5" />
 </head>
 <body>
     <div id="app">
@@ -19,6 +19,10 @@
             <div id="scrollable-middle">
                 <section class="panel">
                     <h3 class="section-label">Analysis</h3>
+                    <div class="year-row">
+                        <label class="field-label" for="year-select">Year</label>
+                        <select id="year-select" class="select"></select>
+                    </div>
                     <div class="tool-group">
                         <button id="btn-preview" class="btn btn-outline" title="Download and display satellite RGB imagery">Satellite preview</button>
                         <button id="btn-ndvi" class="btn btn-outline" title="Compute NDVI vegetation health index">NDVI index</button>
@@ -35,6 +39,16 @@
                             </div>
                             <button id="btn-sam-clear" class="btn btn-ghost btn-sm">Clear points</button>
                         </div>
+                    </div>
+
+                    <div class="tool-group">
+                        <h4 class="field-label">Change detection (NDVI, peak season)</h4>
+                        <div class="change-row">
+                            <select id="change-year-a" class="select"></select>
+                            <span class="date-sep">→</span>
+                            <select id="change-year-b" class="select"></select>
+                        </div>
+                        <button id="btn-change" class="btn btn-outline" title="NDVI difference between two years">Detect change</button>
                     </div>
                 </section>
 
@@ -109,6 +123,6 @@
     <script src="/static/vendor/leaflet/leaflet.js"></script>
     <script src="/static/vendor/leaflet-draw/leaflet.draw.js"></script>
     <script src="/static/vendor/plotly/plotly.min.js"></script>
-    <script src="/static/app.js?v=5"></script>
+    <script src="/static/app.js?v=6"></script>
 </body>
 </html>
