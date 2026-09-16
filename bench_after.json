@@ -1,0 +1,66 @@
+{
+  "cold": {
+    "preview": {
+      "median_s": 5.5,
+      "runs_s": [
+        6.8,
+        4.72,
+        5.5
+      ],
+      "reads": 3,
+      "read_mpx": 2.7,
+      "png_kb": 2511.2,
+      "out_mpx": 0.9
+    },
+    "ndvi": {
+      "median_s": 6.57,
+      "runs_s": [
+        6.73,
+        6.57,
+        5.18
+      ],
+      "reads": 4,
+      "read_mpx": 3.6,
+      "png_kb": 1279.4,
+      "out_mpx": 0.9
+    },
+    "timeseries": {
+      "median_s": 10.1,
+      "runs_s": [
+        10.61,
+        10.07,
+        10.1
+      ],
+      "reads": 28,
+      "read_mpx": 4.13,
+      "points": 7
+    },
+    "change": {
+      "median_s": 8.75,
+      "runs_s": [
+        8.74,
+        9.17,
+        8.75
+      ],
+      "reads": 4,
+      "read_mpx": 3.6
+    }
+  },
+  "warm": {
+    "preview": {
+      "s": 5.51,
+      "reads": 3,
+      "read_mpx": 2.7
+    },
+    "ndvi": {
+      "s": 1.92,
+      "reads": 4,
+      "read_mpx": 3.6
+    },
+    "preview_again": {
+      "s": 0.48,
+      "reads": 3,
+      "read_mpx": 2.7
+    }
+  }
+}

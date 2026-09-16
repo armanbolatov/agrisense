@@ -62,6 +62,12 @@ services:
     volumes:
       # SAM weights, mounted read-only from the host torch cache.
       - ${SAM_CHECKPOINT_DIR:-${HOME}/.cache/torch/hub/checkpoints}:/models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/presets')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
     deploy:
       resources:
         reservations:

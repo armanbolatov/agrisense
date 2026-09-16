@@ -23,7 +23,10 @@ WORKDIR /app
 
 # torch + torchvision (matched pair from one index). cu128 = GPU by default.
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
-RUN pip install torch torchvision --index-url ${TORCH_INDEX}
+ARG TORCH_VERSION=2.11.0
+ARG TORCHVISION_VERSION=0.26.0
+RUN pip install torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} \
+        --index-url ${TORCH_INDEX}
 
 # Everything else.
 COPY requirements.txt .

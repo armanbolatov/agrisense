@@ -6,6 +6,8 @@ Two-step workflow:
 """
 
 import os
+from threading import Lock
+
 import numpy as np
 import torch
 from segment_anything import sam_model_registry, SamPredictor
@@ -27,6 +29,9 @@ class SamSegmenter:
     def __init__(self):
         self.predictor = None
         self._loaded = False
+        # set_image() runs in a background thread while predict() is served from
+        # the request path — one predictor, so they must not overlap.
+        self._lock = Lock()
         # Current image state
         self.geo_info = None
         self.image_shape = None
@@ -60,10 +65,12 @@ class SamSegmenter:
         if not self._loaded:
             self.load()
 
-        self.predictor.set_image(rgb_array)
-        self.geo_info = geo_info
-        self.image_shape = rgb_array.shape[:2]
-        self._image_set = True
+        with self._lock:
+            self._image_set = False       # stale image is not predictable
+            self.predictor.set_image(rgb_array)
+            self.geo_info = geo_info
+            self.image_shape = rgb_array.shape[:2]
+            self._image_set = True
 
     def _lonlat_to_pixel(self, lon, lat):
         """Convert lon/lat to pixel coordinates in the current image."""
@@ -109,12 +116,13 @@ class SamSegmenter:
             x2, y2 = self._lonlat_to_pixel(box[2], box[1])  # bottom-right
             box_np = np.array([x1, y1, x2, y2], dtype=np.float32)
 
-        masks, scores, _ = self.predictor.predict(
-            point_coords=point_coords,
-            point_labels=point_labels,
-            box=box_np,
-            multimask_output=True,
-        )
+        with self._lock:
+            masks, scores, _ = self.predictor.predict(
+                point_coords=point_coords,
+                point_labels=point_labels,
+                box=box_np,
+                multimask_output=True,
+            )
 
         # Pick the best mask (highest score)
         best_idx = int(np.argmax(scores))

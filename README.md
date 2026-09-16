@@ -127,6 +127,42 @@ OPENAI_API_KEY=sk-... ./start.sh openai        # OpenAI
 4. Ask the AI chat questions about the analysis results — e.g. after running a time
    series: *"When does vegetation peak and what crop type does the profile suggest?"*
 
+## Performance
+
+Every analysis is dominated by network I/O against Planetary Computer, not by GPU
+work. Three changes cut that I/O (see `bench.py`, Kostanay preset, 17x14 km,
+median of 3 runs):
+
+- **Scene + band memoization** (`satellite.py`) — one signed STAC client per
+  process, and scene searches and band reads cached for 30 min. Preview, NDVI,
+  SAM and change detection over the same area and date now share one download.
+- **Resolution cap** — native reads are capped at 1024 px on the long edge, which
+  rasterio serves from the COG overviews. Map overlays and SAM (which resizes to
+  1024 internally) look identical, and the payloads shrink by ~60%.
+- **Band subsetting** — change detection asks for red + NIR instead of all four
+  bands, halving its downloads.
+
+| Analysis (cold cache) | Before | After |
+|---|---|---|
+| Satellite preview | 8.2 s | **5.5 s** |
+| NDVI | 7.8 s | **6.6 s** |
+| NDVI time series (7 months) | 12.5 s | **10.1 s** |
+| Change detection (2 years) | 14.5 s | **8.8 s** |
+| Preview -> NDVI -> preview, one area | 23.1 s | **7.9 s** |
+
+Overlay payloads: preview 7.0 MB -> 2.5 MB, NDVI 3.2 MB -> 1.2 MB base64 PNG.
+
+The cap also applies to GeoTIFF export, so a large area exports at ~15 m/px
+instead of 10 m. Set `AGRISENSE_MAX_PX=0` for full native resolution, or any
+pixel count to trade payload size against detail.
+
+Reproduce the measurement:
+
+```bash
+docker run --rm --network host -v $PWD:/app -w /app agrisense:latest \
+    python bench.py --out bench_after.json
+```
+
 ## Architecture
 
 ```

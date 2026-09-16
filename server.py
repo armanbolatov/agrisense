@@ -40,7 +40,7 @@ app.mount("/static", StaticFiles(directory=str(SCRIPT_DIR / "static")), name="st
 # ---------------------------------------------------------------------------
 
 jobs: dict = {}  # job_id -> {status, progress, result, error, type}
-gpu_lock = asyncio.Lock()
+_JOBS_MAX = 64
 
 # Lazy-loaded models
 _sam_segmenter = None
@@ -57,6 +57,15 @@ export_store: dict = {}
 
 def _store_export(kind, array, bbox):
     export_store[kind] = {"array": array, "bbox": bbox}
+
+
+def _new_job(kind):
+    """Register a job, evicting the oldest so `jobs` can't grow without bound."""
+    while len(jobs) >= _JOBS_MAX:
+        jobs.pop(next(iter(jobs)))
+    job_id = str(uuid4())
+    jobs[job_id] = {"status": "queued", "type": kind}
+    return job_id
 
 
 # Result cache: re-running the same analysis on the same area+dates is instant
@@ -322,8 +331,7 @@ async def job_result(job_id: str):
 @app.post("/api/satellite-preview")
 async def satellite_preview(req: BboxRequest, background_tasks: BackgroundTasks):
     _validate_bbox(req.bbox)
-    job_id = str(uuid4())
-    jobs[job_id] = {"status": "queued", "type": "preview"}
+    job_id = _new_job("preview")
     background_tasks.add_task(_run_preview, job_id, req.bbox, req.date_ranges)
     return {"job_id": job_id}
 
@@ -358,8 +366,7 @@ def _run_preview(job_id, bbox, date_ranges):
 @app.post("/api/sam/load")
 async def sam_load(req: SamLoadRequest, background_tasks: BackgroundTasks):
     _validate_bbox(req.bbox)
-    job_id = str(uuid4())
-    jobs[job_id] = {"status": "queued", "type": "sam_load"}
+    job_id = _new_job("sam_load")
     background_tasks.add_task(_run_sam_load, job_id, req.bbox, req.date_range)
     return {"job_id": job_id}
 
@@ -422,8 +429,7 @@ async def sam_predict(req: SamPredictRequest):
 @app.post("/api/ndvi")
 async def ndvi(req: BboxRequest, background_tasks: BackgroundTasks):
     _validate_bbox(req.bbox)
-    job_id = str(uuid4())
-    jobs[job_id] = {"status": "queued", "type": "ndvi"}
+    job_id = _new_job("ndvi")
     background_tasks.add_task(_run_ndvi, job_id, req.bbox, req.date_ranges)
     return {"job_id": job_id}
 
@@ -481,8 +487,7 @@ def _run_ndvi(job_id, bbox, date_ranges):
 @app.post("/api/timeseries")
 async def timeseries(req: TimeSeriesRequest, background_tasks: BackgroundTasks):
     _validate_bbox(req.bbox)
-    job_id = str(uuid4())
-    jobs[job_id] = {"status": "queued", "type": "timeseries"}
+    job_id = _new_job("timeseries")
     background_tasks.add_task(_run_timeseries, job_id, req.bbox, _monthly_windows(req.year))
     return {"job_id": job_id}
 
@@ -527,8 +532,7 @@ def _run_timeseries(job_id, bbox, date_windows):
 @app.post("/api/cropmap")
 async def cropmap(req: CropMapRequest, background_tasks: BackgroundTasks):
     _validate_bbox(req.bbox)
-    job_id = str(uuid4())
-    jobs[job_id] = {"status": "queued", "type": "cropmap"}
+    job_id = _new_job("cropmap")
     background_tasks.add_task(_run_cropmap, job_id, req.bbox, _monthly_windows(req.year), req.year)
     return {"job_id": job_id}
 
@@ -645,8 +649,7 @@ async def export_geotiff(kind: str):
 @app.post("/api/change")
 async def change(req: ChangeRequest, background_tasks: BackgroundTasks):
     _validate_bbox(req.bbox)
-    job_id = str(uuid4())
-    jobs[job_id] = {"status": "queued", "type": "change"}
+    job_id = _new_job("change")
     background_tasks.add_task(_run_change, job_id, req.bbox, req.year_a, req.year_b)
     return {"job_id": job_id}
 
@@ -665,7 +668,8 @@ def _run_change(job_id, bbox, year_a, year_b):
         for label, year in (("a", year_a), ("b", year_b)):
             jobs[job_id]["status"] = "downloading"
             jobs[job_id]["message"] = f"Downloading peak-season NDVI for {year}..."
-            bands, _ = download_bands_for_indices(bbox, f"{year}-07-01/{year}-07-31")
+            bands, _ = download_bands_for_indices(
+                bbox, f"{year}-07-01/{year}-07-31", bands=("red",))
             ndvis[label] = compute_ndvi(bands["nir"], bands["red"])
 
         a, b = ndvis["a"], ndvis["b"]
@@ -931,6 +935,8 @@ async def _stream_llm(provider, system_prompt, history):
 
 def _chat_history(session_id, message):
     """Append the user message to the session history (trimmed) and return it."""
+    while len(chat_sessions) > 64 and session_id not in chat_sessions:
+        chat_sessions.pop(next(iter(chat_sessions)))
     history = chat_sessions.setdefault(session_id, [])
     history.append({"role": "user", "content": message})
     if len(history) > 20:
