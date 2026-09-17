@@ -32,7 +32,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from pydantic import BaseModel
 
 from satellite import _ensure_size, read_band, search_sentinel2
@@ -202,8 +202,18 @@ class ClassifyRequest(BaseModel):
 
 
 @app.get("/health")
-def health():
-    return {"ok": True}
+def health(response: Response):
+    """Exercise CUDA, not just the event loop: a dead GPU kept answering ok, so
+    the app went on sending it work and silently fell back to rule-based."""
+    if DEVICE == "cpu":
+        return {"ok": True, "device": "cpu"}
+    try:
+        with torch.inference_mode():
+            torch.ones(8, 8, device="cuda").matmul(torch.ones(8, 8, device="cuda")).sum().item()
+    except Exception as e:  # noqa: BLE001 — any CUDA failure means unusable
+        response.status_code = 503
+        return {"ok": False, "device": "cuda", "error": f"{type(e).__name__}: {e}"}
+    return {"ok": True, "device": "cuda"}
 
 
 @app.post("/classify")
