@@ -1,7 +1,7 @@
 """SAM (Segment Anything Model) interactive segmentation wrapper.
 
 Two-step workflow:
-1. load_image() — encode image (slow, ~10-30s) — call once per area
+1. set_image() — encode image (~0.1 s on GPU in fp16) — call once per area
 2. predict() — predict mask from points/box (fast, ~50ms) — call per click
 """
 
@@ -21,6 +21,14 @@ SAM_MODEL_TYPE = os.environ.get("SAM_MODEL_TYPE", "vit_b")
 SAM_CHECKPOINT = os.environ.get("SAM_CHECKPOINT", os.path.expanduser(
     "~/.cache/torch/hub/checkpoints/sam_vit_b_01ec64.pth"
 ))
+
+# Precision of the ViT image encoder on GPU: 99% of SAM's weights and the whole
+# slow 1024 px encode. The prompt decoder always stays fp32. Measured on an
+# RTX 5090 (bench_sam.json): fp16 halves the weights, encodes 2.4x faster and its
+# masks match fp32 at IoU 0.9998, beating bf16 on speed, memory and agreement.
+# SAM_DTYPE=fp32 restores the original model.
+SAM_DTYPE = {"fp32": torch.float32, "fp16": torch.float16,
+             "bf16": torch.bfloat16}[os.environ.get("SAM_DTYPE", "fp16")]
 
 
 class SamSegmenter:
@@ -51,6 +59,8 @@ class SamSegmenter:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=SAM_CHECKPOINT)
         sam.to(device)
+        self.dtype = SAM_DTYPE if device == "cuda" else torch.float32
+        sam.image_encoder.to(dtype=self.dtype)
         self.predictor = SamPredictor(sam)
         self.device = device
         self._loaded = True
@@ -65,7 +75,9 @@ class SamSegmenter:
         if not self._loaded:
             self.load()
 
-        with self._lock:
+        # Autocast lets the fp32 input meet the half-precision encoder weights.
+        with self._lock, torch.autocast(self.device, dtype=self.dtype,
+                                        enabled=self.dtype != torch.float32):
             self._image_set = False       # stale image is not predictable
             self.predictor.set_image(rgb_array)
             self.geo_info = geo_info

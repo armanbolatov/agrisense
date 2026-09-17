@@ -1,0 +1,32 @@
+{
+  "image": [
+    879,
+    1024,
+    3
+  ],
+  "fp32": {
+    "weights_gib": 2.39,
+    "load_s": 5.65,
+    "encode_s": 0.182,
+    "click_ms": 98.8,
+    "peak_vram_gib": 5.61
+  },
+  "bf16": {
+    "weights_gib": 1.2,
+    "load_s": 4.68,
+    "encode_s": 0.087,
+    "click_ms": 82.5,
+    "peak_vram_gib": 3.8,
+    "iou_vs_fp32_mean": 0.9924,
+    "iou_vs_fp32_min": 0.9724
+  },
+  "fp16": {
+    "weights_gib": 1.2,
+    "load_s": 4.8,
+    "encode_s": 0.077,
+    "click_ms": 73.7,
+    "peak_vram_gib": 2.82,
+    "iou_vs_fp32_mean": 0.9998,
+    "iou_vs_fp32_min": 0.9996
+  }
+}

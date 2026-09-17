@@ -382,7 +382,7 @@ def _run_sam_load(job_id, bbox, date_range):
         rgb, geo_info = download_rgb(bbox, date_range)
 
         jobs[job_id]["status"] = "encoding"
-        jobs[job_id]["message"] = "Computing SAM embeddings (this takes 10-30s)..."
+        jobs[job_id]["message"] = "Computing SAM embeddings..."
 
         segmenter = get_sam_segmenter()
         segmenter.set_image(rgb, geo_info)

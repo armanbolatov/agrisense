@@ -1,0 +1,24 @@
+{
+  "load": {
+    "model": "Qwen/Qwen3-4B-Instruct-2507",
+    "quantization": "None",
+    "weights_gib": "7.64",
+    "load_s": "25.033246",
+    "kv_cache_tokens": "32608",
+    "max_concurrency": "7.96"
+  },
+  "batch1": {
+    "ttft_ms": 51.3,
+    "decode_tok_s": 166.0,
+    "prompt_tokens": 657
+  },
+  "batch8": {
+    "total_tok_s": 908.1,
+    "ttft_ms": 218.5
+  },
+  "answers": {
+    "hi": "Hi! 👋 How’s it going? I’m here to help with satellite-based crop analysis and remote sensing for your agricultural area in Kazakhstan. What would you like to explore today? 🌾",
+    "What is NDVI?": "NDVI stands for Normalized Difference Vegetation Index. It's a measure of vegetation health calculated from satellite imagery using the near-infrared and red light bands. Values range from -1 to 1, with higher values (above 0.3) indicating healthy, dense vegetation—great for monitoring crop growth and health. In our app, NDVI helps show how crops are doing over time.",
+    "How does change detection work?": "Change detection works by comparing the NDVI (vegetation health) values from two different years—typically the peak growing seasons—across the same area. It calculates the difference in NDVI between those years, highlighting areas where vegetation has increased or decreased. For example, a rise might indicate crop expansion or better growth, while a drop could signal crop loss or land degradation. This helps farmers and planners track land use changes over time."
+  }
+}

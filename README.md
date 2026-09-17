@@ -34,7 +34,7 @@ The default `up` brings up a **self-contained** two-container stack:
 
 | Service | What it does |
 |---|---|
-| `vllm` | Serves **Qwen3-4B-Instruct** (OpenAI-compatible API) on the GPU for chat |
+| `vllm` | Serves **Qwen3-4B-Instruct** in FP8 (OpenAI-compatible API) on the GPU for chat |
 | `agrisense` | The web app; SAM on the GPU, satellite data, indices, rule-based crop map |
 
 **SAM checkpoint** — mount it from the host (read-only). Fetch one once:
@@ -50,7 +50,7 @@ curl -L -o ~/.cache/torch/hub/checkpoints/sam_vit_h_4b8939.pth \
 ```
 
 Change the chat model: `VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct docker compose up -d vllm`
-(default is `Qwen/Qwen3-4B-Instruct-2507`).
+(default is `Qwen/Qwen3-4B-Instruct-2507-FP8`; see [Model precision](#model-precision)).
 
 ### TerraMind crop model (optional)
 
@@ -163,6 +163,55 @@ docker run --rm --network host -v $PWD:/app -w /app agrisense:latest \
     python bench.py --out bench_after.json
 ```
 
+### Model precision
+
+Both GPU models now run at reduced precision by default (`bench_models.py`,
+RTX 5090, median of 5 runs after warmup).
+
+**Qwen3-4B-Instruct via vLLM: bf16 -> FP8.** The official
+`Qwen/Qwen3-4B-Instruct-2507-FP8` checkpoint (W8A8, block-wise weight scales)
+under the same `--gpu-memory-utilization 0.4` budget and the app's real
+657-token system prompt:
+
+| | bf16 | **FP8** | Change |
+|---|---|---|---|
+| Weights in GPU memory | 7.64 GiB | **4.27 GiB** | -44% |
+| KV cache | 32,608 tokens | **44,032 tokens** | +35% |
+| Parallel 4k-token requests that fit | 7.96 | **10.75** | +35% |
+| Decode, 1 request | 166 tok/s | **177 tok/s** | +6% |
+| Decode, 8 concurrent requests | 908 tok/s | **1,088 tok/s** | +20% |
+| Time to first token | 51 ms | 62 ms | +11 ms |
+
+The main win is memory: the same budget holds 35% more context. Answers to the
+same prompts at temperature 0 are equivalent in content (stored under `answers`
+in the JSON files). Back to bf16: `VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507`.
+
+**SAM ViT-H: fp32 -> fp16 image encoder.** The ViT encoder is 99% of the weights
+and the whole 1024 px encode; the prompt decoder stays fp32. Measured on a real
+Kostanay tile with 5 point prompts, agreement as polygon IoU against fp32:
+
+| | fp32 | bf16 | **fp16** |
+|---|---|---|---|
+| Weights | 2.39 GiB | 1.20 GiB | **1.20 GiB** |
+| Peak GPU memory | 5.61 GiB | 3.80 GiB | **2.82 GiB** |
+| Image encode | 182 ms | 87 ms | **77 ms** |
+| Click to polygon | 99 ms | 83 ms | **74 ms** |
+| Mask IoU vs fp32, mean / min | 1 | 0.992 / 0.972 | **0.9998 / 0.9996** |
+
+fp16 beats bf16 on every column on this GPU, so it is the default. Set
+`SAM_DTYPE=fp32` for the original model.
+
+Reproduce:
+
+```bash
+VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 docker compose up -d --wait vllm
+.venv/bin/python bench_models.py --target llm --out bench_llm_bf16.json
+docker compose up -d --wait vllm
+.venv/bin/python bench_models.py --target llm --out bench_llm_fp8.json
+docker compose run --rm --no-deps -v $PWD:/app agrisense \
+    python bench_models.py --target sam --out bench_sam.json
+```
+
 ## Architecture
 
 ```
@@ -188,10 +237,12 @@ start.sh           Local (non-Docker) launch script
 | `CHAT_PROVIDER` | `local`, `anthropic`, or `openai` |
 | `LOCAL_LLM_URL` | OpenAI-compatible endpoint (Docker default: `http://vllm:8000/v1`) |
 | `LOCAL_LLM_MODEL` | Model name for local LLM (Docker default: `qwen`) |
-| `VLLM_MODEL` | HuggingFace model served by the vLLM container |
+| `VLLM_MODEL` | HuggingFace model served by the vLLM container (default `Qwen/Qwen3-4B-Instruct-2507-FP8`) |
+| `VLLM_EXTRA_ARGS` | Extra vLLM flags, e.g. `--quantization fp8` for online FP8 on bf16 weights |
 | `VLLM_GPU_UTIL` | Fraction of GPU memory vLLM reserves (default `0.4`; lower for small GPUs) |
 | `AGRISENSE_PORT` | Host port for the web app (default `8501`) |
 | `SAM_MODEL_TYPE` | `vit_h` (default) or `vit_b` (lighter) |
+| `SAM_DTYPE` | SAM image-encoder precision on GPU: `fp16` (default), `bf16`, or `fp32` |
 | `SAM_CHECKPOINT` | In-container path to SAM weights (default `/models/sam_vit_h_4b8939.pth`) |
 | `SAM_CHECKPOINT_DIR` | Host dir mounted to `/models` (default `~/.cache/torch/hub/checkpoints`) |
 | `TERRAMIND_URL` | Crop-model service endpoint (default `http://terramind:8600`) |

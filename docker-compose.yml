@@ -16,12 +16,16 @@ services:
   vllm:
     image: vllm/vllm-openai:latest
     container_name: agrisense-vllm
+    # FP8 checkpoint by default (W8A8, ~40% smaller weights). Baseline bf16:
+    #   VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 docker compose up -d vllm
+    # Online FP8 on the bf16 weights, no extra download:
+    #   VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 VLLM_EXTRA_ARGS="--quantization fp8" ...
     command: >
-      --model ${VLLM_MODEL:-Qwen/Qwen3-4B-Instruct-2507}
+      --model ${VLLM_MODEL:-Qwen/Qwen3-4B-Instruct-2507-FP8}
       --served-model-name qwen
       --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.4}
       --max-model-len 4096
-      --port 8000
+      --port 8000 ${VLLM_EXTRA_ARGS:-}
     volumes:
       - hf-cache:/root/.cache/huggingface
       - vllm-cache:/root/.cache/vllm     # persist torch.compile cache across restarts
