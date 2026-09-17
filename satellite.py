@@ -23,6 +23,10 @@ from pyproj import Transformer
 _TTL = 1800
 _BAND_CACHE_MAX = 32
 
+# Candidates per search. Cloud-sorted hits are often tiles that merely clip the
+# area, so _pick_scene needs enough of them to find a pass that covers it.
+_SEARCH_ITEMS = 50
+
 # Native reads are capped to this many pixels on the long edge. Map overlays and
 # SAM (which resizes to 1024 internally) gain nothing from a full 10 m raster,
 # and rasterio serves the smaller read from the COG's overviews instead of
@@ -75,6 +79,75 @@ def _ensure_size(array, target_size):
     return array
 
 
+class Scene:
+    """One acquisition: the tiles of a single pass that cover the bbox.
+
+    An area straddling an MGRS tile edge (the Akmola preset straddles four) fits
+    in no single tile. Attributes fall through to the first tile, so only
+    read_band needs to know about the rest.
+    """
+
+    def __init__(self, tiles):
+        self.tiles = tiles
+
+    def __getattr__(self, name):
+        return getattr(self.tiles[0], name)
+
+    @property
+    def id(self):
+        return "+".join(t.id for t in self.tiles)
+
+
+def _minimal_tiles(tiles, area):
+    """Tiles of one pass that add new ground, least cloudy first.
+
+    Drops neighbours that miss the area and the duplicate tiles the catalog
+    returns for reprocessed versions.
+    """
+    from shapely.geometry import shape
+    from shapely.ops import unary_union
+
+    kept, covered = [], None
+    for tile in sorted(tiles, key=lambda t: float(t.properties.get("eo:cloud_cover") or 0)):
+        part = shape(tile.geometry).intersection(area)
+        if part.is_empty or (covered is not None and part.difference(covered).is_empty):
+            continue
+        kept.append(tile)
+        covered = part if covered is None else unary_union([covered, part])
+        if covered.area >= area.area - 1e-12:
+            break
+    return kept, covered
+
+
+def _pick_scene(items, bbox):
+    """The pass covering most of the bbox, then fewest tiles, then least cloud.
+
+    A scene only has to *intersect* the bbox, so the least-cloudy hit is often a
+    tile clipping one corner. Tiles of one pass share illumination, so merging
+    them in read_band leaves no seam.
+    """
+    if not items:
+        return None
+    from shapely.geometry import box
+    area = box(*bbox)
+
+    passes = {}
+    for it in items:
+        passes.setdefault(it.properties["datetime"], []).append(it)
+
+    def rank(tiles):
+        kept, covered = _minimal_tiles(tiles, area)
+        if not kept:
+            return None
+        cloud = max(float(t.properties.get("eo:cloud_cover") or 0) for t in kept)
+        return (-round(covered.area / area.area, 3), len(kept), cloud), kept
+
+    ranked = [r for r in map(rank, passes.values()) if r]
+    if not ranked:
+        return Scene([items[0]])
+    return Scene(min(ranked, key=lambda r: r[0])[1])
+
+
 def search_sentinel2(bbox, date_range, max_cloud=20):
     """Search Planetary Computer for best cloud-free Sentinel-2 scene.
 
@@ -84,7 +157,7 @@ def search_sentinel2(bbox, date_range, max_cloud=20):
         max_cloud: maximum cloud cover percentage
 
     Returns:
-        pystac Item or None
+        Scene (one or more tiles of a single pass) or None
     """
     key = (_cache_key_bbox(bbox), date_range, max_cloud)
     with _cache_lock:
@@ -98,20 +171,64 @@ def search_sentinel2(bbox, date_range, max_cloud=20):
         datetime=date_range,
         query={"eo:cloud_cover": {"lt": max_cloud}},
         sortby=[{"field": "eo:cloud_cover", "direction": "asc"}],
-        max_items=3,
+        max_items=_SEARCH_ITEMS,
     )
-    items = list(results.items())
-    item = items[0] if items else None
+    item = _pick_scene(list(results.items()), bbox)
     with _cache_lock:
         _scene_cache[key] = (time.time(), item)
     return item
+
+
+def _harmonize(item, asset_name, arr):
+    """Undo ESA's +1000 offset (processing baseline 04.00, 2022+).
+
+    Done at the one place bands are read, so every tool shares one reflectance
+    scale; a 2022+ scene otherwise reads ~1000 DN brighter than an older one.
+    """
+    if not asset_name.startswith("B"):
+        return arr              # SCL is a class band, not reflectance
+    if float(item.properties.get("s2:processing_baseline") or 0) < 4.0:
+        return arr
+    return np.clip(arr - 1000, 0, None)     # new array: cached reads stay untouched
+
+
+def _read_tile(tile, asset_name, bbox_lonlat, target_size, resampling):
+    """One tile's pixels over the bbox, padded with nodata where it does not reach."""
+    with rasterio.open(tile.assets[asset_name].href) as src:
+        transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
+        west, south = transformer.transform(bbox_lonlat[0], bbox_lonlat[1])
+        east, north = transformer.transform(bbox_lonlat[2], bbox_lonlat[3])
+        window = from_bounds(west, south, east, north, transform=src.transform)
+        window = window.round_offsets().round_lengths()
+
+        if target_size is None and MAX_PIXELS:
+            longest = max(window.height, window.width)
+            if longest > MAX_PIXELS:
+                scale = MAX_PIXELS / longest
+                target_size = (max(1, round(window.height * scale)),
+                               max(1, round(window.width * scale)))
+
+        # Without boundless a partial overlap is silently clipped, and the
+        # caller then stretches it over the whole bbox. Pad with nodata instead.
+        inside = (window.col_off >= 0 and window.row_off >= 0
+                  and window.col_off + window.width <= src.width
+                  and window.row_off + window.height <= src.height)
+        edge = {} if inside else {"boundless": True, "fill_value": 0}
+
+        if target_size:
+            data = src.read(1, window=window, out_shape=target_size,
+                            resampling=resampling, **edge)
+        else:
+            data = src.read(1, window=window, **edge)
+
+        return data.astype(np.float32), src.window_transform(window), str(src.crs)
 
 
 def read_band(item, asset_name, bbox_lonlat, native_res, target_size=None):
     """Read a single band from a COG asset, cropped to bbox.
 
     Args:
-        item: pystac Item
+        item: a Scene (or pystac Item) from search_sentinel2
         asset_name: e.g. "B02", "B8A"
         bbox_lonlat: [west, south, east, north] in EPSG:4326
         native_res: native resolution in meters
@@ -128,32 +245,30 @@ def read_band(item, asset_name, bbox_lonlat, native_res, target_size=None):
             _band_cache.move_to_end(key)
             return hit[1]
 
-    href = item.assets[asset_name].href
-    with rasterio.open(href) as src:
-        transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
-        west, south = transformer.transform(bbox_lonlat[0], bbox_lonlat[1])
-        east, north = transformer.transform(bbox_lonlat[2], bbox_lonlat[3])
-        window = from_bounds(west, south, east, north, transform=src.transform)
-        window = window.round_offsets().round_lengths()
+    # SCL holds class numbers, so averaging neighbours would invent classes.
+    resampling = Resampling.nearest if asset_name == "SCL" else Resampling.bilinear
+    tiles = getattr(item, "tiles", [item])
 
-        if target_size is None and MAX_PIXELS:
-            longest = max(window.height, window.width)
-            if longest > MAX_PIXELS:
-                scale = MAX_PIXELS / longest
-                target_size = (max(1, round(window.height * scale)),
-                               max(1, round(window.width * scale)))
+    raw, win_transform, crs = _read_tile(
+        tiles[0], asset_name, bbox_lonlat, target_size, resampling)
+    gap = raw == 0
+    data = _harmonize(tiles[0], asset_name, raw)
 
-        if target_size:
-            data = src.read(1, window=window, out_shape=target_size, resampling=Resampling.bilinear)
-        else:
-            data = src.read(1, window=window)
-
-        # Compute the transform for the read window
-        win_transform = src.window_transform(window)
-        crs = str(src.crs)
+    # Sibling tiles fill what the first did not reach. Same pass and resolution,
+    # so filling the gap on the first one's grid is enough; a tile in another UTM
+    # zone cannot be merged that way and is skipped, leaving nodata.
+    for tile in tiles[1:]:
+        if not gap.any():
+            break
+        arr, _, tile_crs = _read_tile(
+            tile, asset_name, bbox_lonlat, data.shape, resampling)
+        if tile_crs != crs:
+            continue
+        data[gap] = _harmonize(tile, asset_name, arr)[gap]
+        gap &= arr == 0
 
     # Cached arrays are shared between callers, so treat them as read-only.
-    out = (data.astype(np.float32), win_transform, crs)
+    out = (data, win_transform, crs)
     with _cache_lock:
         _band_cache[key] = (time.time(), out)
         while len(_band_cache) > _BAND_CACHE_MAX:

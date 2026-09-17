@@ -92,15 +92,6 @@ def _read_retry(item, asset, bbox, res, target_size=None, tries=4):
             time.sleep(0.5 * (attempt + 1))
 
 
-def _harmonize(item, arr):
-    """Undo ESA's +1000 offset on scenes from processing baseline 04.00 (2022+).
-    Sen4Map was built from 2018 scenes without it, and unharmonized input is so
-    bright that the model calls nearly everything bare soil."""
-    if float(item.properties.get("s2:processing_baseline") or 0) < 4.0:
-        return arr
-    return np.clip(arr - 1000, 0, None)   # new array: cached reads stay untouched
-
-
 def _find_scene(bbox, window):
     """Least-cloudy scene in the window, relaxing the cloud limit if needed."""
     for max_cloud in (20, 60, 100):
@@ -129,8 +120,9 @@ def download_stack(bbox, year):
         if b is None:  # scene classification: nearest-neighbour 20 m -> 10 m, never bilinear
             scl = _read_retry(items[t], "SCL", bbox, 20)
             return t, b, _ensure_size(np.repeat(np.repeat(scl, 2, 0), 2, 1), (H, W))
+        # satellite.read_band already undoes ESA's +1000 offset (2022+ scenes).
         band = _read_retry(items[t], BANDS[b][0], bbox, BANDS[b][1], target_size=(H, W))
-        return t, b, _harmonize(items[t], band)
+        return t, b, band
 
     jobs = [(t, b) for t in present for b in range(len(BANDS))] + [(t, None) for t in present]
     with ThreadPoolExecutor(WORKERS) as pool:

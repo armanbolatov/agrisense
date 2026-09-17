@@ -75,9 +75,9 @@ A request takes 60-90 s: 35-65 s to download 12 months x 11 assets from
 Planetary Computer, 15-32 s of GPU inference. The app caches the result.
 
 Two things matter for correct input. Scenes from ESA processing baseline 04.00
-(2022 onward) carry a +1000 offset that the service removes; without it the model
-calls most land bare soil. Inputs are min-max scaled with the Sen4Map quantiles,
-not mean/std.
+(2022 onward) carry a +1000 offset, removed in `satellite.read_band` for every
+tool; without it the model calls most land bare soil. Inputs are min-max scaled
+with the Sen4Map quantiles, not mean/std.
 
 **How well it transfers.** Sen4Map is European (LUCAS 2018), so the service was
 checked against ESA WorldCover 2021, an independent 10 m land-cover map
