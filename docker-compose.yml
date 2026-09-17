@@ -1,11 +1,13 @@
 # AgriSense GPU stack.
 #
 #   docker compose up -d --wait                      # vllm + agrisense (self-contained)
-#   docker compose --profile terramind up -d --wait  # + the TerraMind crop model
+#   docker compose --profile prithvi up -d --wait    # + the Prithvi-EO-2.0 crop model
 #
 #   vllm       — OpenAI-compatible LLM server (Qwen) for chat
-#   agrisense  — the web app; GPU SAM + chat via vLLM; crops via TerraMind if present,
-#                else a built-in rule-based classifier
+#   agrisense  — the web app; GPU SAM + chat via vLLM; crops via Prithvi (or
+#                TerraMind) if present, else a built-in rule-based classifier
+#   prithvi    — (optional, profile) Prithvi-EO-2.0 fine-tuned on Sen4Map crops.
+#                Needs its checkpoint in ${PRITHVI_CKPT_DIR}; see README.
 #   terramind  — (optional, profile) fine-tuned TerraMind crop-classification model.
 #                Built from a sibling ./terramind repo; needs its checkpoint.
 #
@@ -60,8 +62,9 @@ services:
       LOCAL_LLM_MODEL: qwen
       SAM_MODEL_TYPE: ${SAM_MODEL_TYPE:-vit_h}
       SAM_CHECKPOINT: ${SAM_CHECKPOINT:-/models/sam_vit_h_4b8939.pth}
-      # Crop model service — reached if the `terramind` profile is up, else the
-      # app falls back to its rule-based classifier.
+      # Crop model services, tried in order when their profile is up; if none
+      # answers, the app falls back to its rule-based classifier.
+      PRITHVI_URL: http://prithvi:8601
       TERRAMIND_URL: http://terramind:8600
     volumes:
       # SAM weights, mounted read-only from the host torch cache.
@@ -72,6 +75,35 @@ services:
       timeout: 5s
       retries: 12
       start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  prithvi:
+    profiles: ["prithvi"]        # only starts with: docker compose --profile prithvi up
+    build:
+      context: .
+      dockerfile: prithvi/Dockerfile
+    image: agrisense-prithvi:latest
+    container_name: agrisense-prithvi
+    environment:
+      PRITHVI_BATCH: ${PRITHVI_BATCH:-8}
+      PRITHVI_STRIDE: ${PRITHVI_STRIDE:-0}              # px per label cell; 0 = auto
+      PRITHVI_MAX_WINDOWS: ${PRITHVI_MAX_WINDOWS:-2000}  # auto stride keeps under this
+    volumes:
+      # Slim fine-tuned checkpoint (weights + hyperparameters), read-only.
+      - ${PRITHVI_CKPT_DIR:-${HOME}/models/prithvi-sen4map}:/models:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8601/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 120s
     deploy:
       resources:
         reservations:

@@ -99,7 +99,7 @@ def _cache_store(key, result, latest=None, export=None, export_kind=None):
 
 
 def _decode_array(payload):
-    """Decode a {dtype, shape, b64} array (from the TerraMind service)."""
+    """Decode a {dtype, shape, b64} array (from a crop-model service)."""
     import base64
     buf = base64.b64decode(payload["b64"])
     return np.frombuffer(buf, dtype=payload["dtype"]).reshape(payload["shape"])
@@ -537,26 +537,33 @@ async def cropmap(req: CropMapRequest, background_tasks: BackgroundTasks):
     return {"job_id": job_id}
 
 
-def _cropmap_terramind(job_id, bbox, year):
-    """Try the TerraMind crop model service. Returns result dict or None."""
-    tm_url = os.environ.get("TERRAMIND_URL")
-    if not tm_url:
-        return None
-    try:
-        import httpx
+# Deep-learning crop-model services, tried in order. Each speaks the same
+# /classify contract; if none answers, the rule-based classifier runs.
+_CROP_SERVICES = ("PRITHVI_URL", "TERRAMIND_URL")
+
+
+def _cropmap_service(job_id, bbox, year):
+    """Classify with the first crop-model service that answers. Result dict or None."""
+    import httpx
+    for env in _CROP_SERVICES:
+        url = os.environ.get(env)
+        if not url:
+            continue
         jobs[job_id]["status"] = "computing"
-        jobs[job_id]["message"] = "Running TerraMind crop model (GPU)..."
-        resp = httpx.post(f"{tm_url}/classify",
-                          json={"bbox": bbox, "date_ranges": _seasonal_ranges(year)}, timeout=240.0)
-        resp.raise_for_status()
-        result = resp.json()
-        if "error" in result:
-            return None
-        result.setdefault("bbox", bbox)
-        return result
-    except Exception:
-        traceback.print_exc()
-        return None
+        jobs[job_id]["message"] = "Running crop model on the GPU..."
+        try:
+            resp = httpx.post(f"{url}/classify", timeout=240.0, json={
+                "bbox": bbox, "year": year, "date_ranges": _seasonal_ranges(year)})
+            resp.raise_for_status()
+            result = resp.json()
+        except Exception as e:
+            print(f"Crop service {env} unavailable: {e}")
+            continue
+        if "error" not in result:
+            result.setdefault("bbox", bbox)
+            return result
+        print(f"Crop service {env} declined: {result['error']}")
+    return None
 
 
 def _run_cropmap(job_id, bbox, date_windows, year=2023):
@@ -565,11 +572,11 @@ def _run_cropmap(job_id, bbox, date_windows, year=2023):
         if _cache_complete(job_id, "cropmap", key):
             return
 
-        # Prefer the TerraMind model; fall back to the rule-based classifier.
-        tm = _cropmap_terramind(job_id, bbox, year)
+        # Prefer a deep-learning crop model; fall back to the rule-based classifier.
+        tm = _cropmap_service(job_id, bbox, year)
         if tm is not None:
             latest = {"legend": tm["legend"], "months": tm.get("months", []),
-                      "model": tm.get("model", "terramind_v1_base")}
+                      "model": tm.get("model", "deep-learning crop model")}
             latest_results["cropmap"] = latest
             export = None
             if tm.get("class_array"):  # raw class map for GeoTIFF export
@@ -768,8 +775,11 @@ How AgriSense works (use this to answer accurately, keep it brief):
   NDWI (water) and EVI. "NDVI index" maps it for the selected area.
 - "NDVI time series" samples one cloud-free scene per month (Apr-Oct) and plots
   NDVI/NDWI/EVI to reveal crop phenology.
-- "Classify crops" runs a fine-tuned TerraMind deep-learning model (multi-temporal
-  vision transformer, 13 crop classes) on the GPU, with a rule-based fallback.
+- "Classify crops" runs Prithvi-EO-2.0, a multi-temporal vision transformer
+  fine-tuned on the European Sen4Map dataset, on the GPU. It reads 12 monthly
+  Sentinel-2 images and labels ~150-600 m cells with 8 classes (cereals, root
+  crops, industrial crops, pulses/vegetables, fodder, bareland, woodland,
+  grassland). If it is unavailable, a rule-based seasonal classifier runs instead.
 - "SAM segment" uses Meta's Segment Anything Model: it loads the image, you click
   points on the map (green=include, red=exclude), and SAM predicts the object/field
   outline as a polygon.

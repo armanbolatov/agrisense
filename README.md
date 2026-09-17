@@ -7,7 +7,7 @@ Remote sensing analysis platform built on Sentinel-2 satellite data from Microso
 - **Satellite Preview** — RGB imagery for any region
 - **NDVI / NDWI / EVI** — Vegetation and water index computation
 - **NDVI Time Series** — Seasonal vegetation dynamics (one scene per month) as an interactive **Plotly** chart (NDVI + toggleable NDWI/EVI), with a rule-based phenology interpretation (crop-type hint)
-- **Crop Classification** — Per-pixel crop map. Uses the fine-tuned **TerraMind** multi-temporal model (13 classes, GPU) when its optional service is running, with an automatic fallback to a built-in rule-based seasonal classifier
+- **Crop Classification** — Crop map from **Prithvi-EO-2.0** (IBM/NASA foundation model) fine-tuned on **Sen4Map** crops: 8 classes from 12 monthly Sentinel-2 frames, GPU, when its optional service is running; automatic fallback to a built-in rule-based seasonal classifier
 - **Season Slider** — Scrub the multi-temporal imagery (Spring / Peak / Late) over the classified map to see the season change
 - **Change Detection** — NDVI difference between two years' peak seasons (greener / browner map + stats)
 - **SAM Segmentation** — Interactive click-to-segment using Segment Anything Model (GPU)
@@ -52,20 +52,50 @@ curl -L -o ~/.cache/torch/hub/checkpoints/sam_vit_h_4b8939.pth \
 Change the chat model: `VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct docker compose up -d vllm`
 (default is `Qwen/Qwen3-4B-Instruct-2507-FP8`; see [Model precision](#model-precision)).
 
-### TerraMind crop model (optional)
+### Crop model: Prithvi-EO-2.0 on Sen4Map (optional)
 
-The "Classify crops" button uses the fine-tuned TerraMind multi-temporal model
-(13 classes) when its service is running; otherwise the app uses the built-in
-rule-based classifier — so the base stack works on its own. To enable TerraMind
-you need the sibling `terramind` repo (with its checkpoint under `output/`)
-next to this one, then start with the profile:
+"Classify crops" uses a Prithvi-EO-2.0-300M checkpoint fine-tuned with terratorch
+on the Sen4Map crop task when its service is up; otherwise the app runs the
+built-in rule-based classifier, so the base stack works on its own.
+
+The model labels a 150 m window from 12 monthly frames of 10 Sentinel-2 bands
+with one of 8 classes: cereals, root crops, industrial crops, pulses/vegetables,
+fodder, bareland, woodland, grassland. The service slides that window over the
+area, one label per 150-600 m cell (`PRITHVI_STRIDE`, auto by area size).
+Validation accuracy of the checkpoint: 84.3% overall, 64.9% class-balanced.
+
+Put the checkpoint in `~/models/prithvi-sen4map/` (or set `PRITHVI_CKPT_DIR`),
+then start with the profile. The image builds on `agrisense-terramind:latest`.
 
 ```bash
-docker compose --profile terramind up -d --wait
+docker compose --profile prithvi up -d --wait
 ```
 
-It builds from `../terramind`, bakes the pretrained backbone into the image, and
-mounts the checkpoint read-only from `${TERRAMIND_DIR:-../terramind}/output`.
+A request takes 60-90 s: 35-65 s to download 12 months x 11 assets from
+Planetary Computer, 15-32 s of GPU inference. The app caches the result.
+
+Two things matter for correct input. Scenes from ESA processing baseline 04.00
+(2022 onward) carry a +1000 offset that the service removes; without it the model
+calls most land bare soil. Inputs are min-max scaled with the Sen4Map quantiles,
+not mean/std.
+
+**How well it transfers.** Sen4Map is European (LUCAS 2018), so the service was
+checked against ESA WorldCover 2021, an independent 10 m land-cover map
+(`prithvi/validate_worldcover.py`, results in `bench_prithvi_worldcover.json`):
+
+| Region | WorldCover cropland | Cropland found as crop | Prithvi crop that is cropland |
+|---|---|---|---|
+| Beauce, France (in-domain) | 87% | 96% | 88% |
+| Akmola, Kazakhstan | 65% | 69% | 76% |
+| Kostanay, Kazakhstan (mostly steppe) | 14% | 10% | 22% |
+
+In Europe it works as trained. In dense Kazakh cropland it finds most fields,
+mostly as cereals. Kazakh steppe is the weak spot: it is often labelled woodland
+or bareland, and scattered fields inside it are missed. Treat the Kazakhstan
+output as indicative, not validated.
+
+The older TerraMind service (`--profile terramind`) is still wired as a second
+choice but needs its fine-tuned checkpoint in `../terramind/output`.
 
 ## Hosting & remote access
 
@@ -83,11 +113,11 @@ Run it on any machine with an NVIDIA GPU + the toolkit. The app binds
 analyses that use your GPU, the LLM, and Planetary Computer bandwidth. Before
 exposing it publicly, put it behind a reverse proxy with auth (nginx/Caddy basic
 auth, or Cloudflare Access), or restrict the firewall to known IPs. Keep the
-`vllm`/`terramind` ports internal (they are, by default — don't publish them).
+`vllm`/`prithvi`/`terramind` ports internal (they are, by default — don't publish them).
 
 ### Small GPU
 
-The full default (Qwen3-4B + SAM `vit_h` + TerraMind) needs ~22 GB VRAM. For an
+The full stack (Qwen3-4B + SAM `vit_h` + Prithvi) needs ~22 GB VRAM. For an
 8–16 GB GPU, create a `.env` next to `docker-compose.yml`:
 
 ```env
@@ -97,7 +127,7 @@ SAM_MODEL_TYPE=vit_b
 SAM_CHECKPOINT=/models/sam_vit_b_01ec64.pth
 ```
 
-and run the default `docker compose up -d` (skip TerraMind). That's ~4 GB VRAM
+and run the default `docker compose up -d` (skip Prithvi). That's ~4 GB VRAM
 (Qwen-0.5B ≈ 2 GB + SAM `vit_b` ≈ 1.5 GB). For no GPU at all, build the CPU image
 (`docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cpu -t agrisense .`)
 and point chat at a hosted API (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`).
@@ -223,8 +253,9 @@ cropmap.py         Rule-based seasonal crop classifier (fallback) + season stack
 sam_segmenter.py   SAM wrapper with georeferencing
 mcp_server.py      MCP tools for Claude Code
 static/            Frontend (Leaflet map + vendored Leaflet/Plotly, neutral UI)
-docker-compose.yml vllm + agrisense; terramind behind the `terramind` profile
+docker-compose.yml vllm + agrisense; prithvi / terramind behind their profiles
 Dockerfile         App image (CUDA torch by default, TORCH_INDEX arg for CPU)
+prithvi/           Prithvi-EO-2.0 crop service + WorldCover validation script
 ../terramind/      Optional TerraMind crop service (separate repo + checkpoint)
 install-gpu.sh     One-time NVIDIA Container Toolkit setup
 start.sh           Local (non-Docker) launch script
@@ -245,7 +276,12 @@ start.sh           Local (non-Docker) launch script
 | `SAM_DTYPE` | SAM image-encoder precision on GPU: `fp16` (default), `bf16`, or `fp32` |
 | `SAM_CHECKPOINT` | In-container path to SAM weights (default `/models/sam_vit_h_4b8939.pth`) |
 | `SAM_CHECKPOINT_DIR` | Host dir mounted to `/models` (default `~/.cache/torch/hub/checkpoints`) |
-| `TERRAMIND_URL` | Crop-model service endpoint (default `http://terramind:8600`) |
+| `PRITHVI_URL` | Prithvi crop service, tried first (default `http://prithvi:8601`) |
+| `PRITHVI_CKPT_DIR` | Host dir holding `prithvi_sen4map_crops.ckpt` (default `~/models/prithvi-sen4map`) |
+| `PRITHVI_STRIDE` | Pixels per label cell, multiple of 15 (default `0` = auto) |
+| `PRITHVI_MAX_WINDOWS` | Auto stride keeps the window count under this (default `2000`) |
+| `PRITHVI_BATCH` | Windows per GPU batch (default `8`; ~6 GB) |
+| `TERRAMIND_URL` | TerraMind crop service, tried second (default `http://terramind:8600`) |
 | `TERRAMIND_DIR` | Host path to the terramind repo (for the checkpoint mount) |
 
 ## License
