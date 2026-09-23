@@ -55,8 +55,14 @@ Q_LO = np.array([67.0, 122.0, 93.27, 158.5, 160.77, 174.27, 162.27, 149.0, 84.5,
 Q_HI = np.array([2089.0, 2598.45, 3214.5, 3620.45, 4033.61, 4613.0, 4825.45, 4945.72,
                  5140.84, 4414.45], np.float32)
 
-CLASSES = ["Cereals", "Root crops", "Industrial crops", "Pulses, vegetables, flowers",
-           "Fodder crops", "Bareland", "Woodland and shrubland", "Grassland"]
+# Sen4Map crop classes in training order (terratorch/datasets/sen4map.py,
+# crop_classification_map). "Nonpermanent" and "Dry" matter: permanent industrial
+# crops, orchards and vineyards fall under Woodland and shrubland instead. The
+# mapping has no built-up, water or wetland class, so such pixels are forced
+# into one of these eight.
+CLASSES = ["Cereals", "Root crops", "Nonpermanent industrial crops",
+           "Dry pulses, vegetables and flowers", "Fodder crops", "Bareland",
+           "Woodland and shrubland", "Grassland"]
 COLORS = ["#e3b505", "#f28e2b", "#9d4edd", "#e377c2",
           "#a6d96a", "#b08968", "#1f4e1f", "#4daf4a"]
 
