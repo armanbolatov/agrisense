@@ -3,6 +3,7 @@
 Adapted from /home/arman/terramind/run_crop_kz.py
 """
 
+import hashlib
 import os
 import time
 from collections import OrderedDict
@@ -21,7 +22,16 @@ from pyproj import Transformer
 # and reused across tools (preview, NDVI, SAM, crop map, change detection).
 # Signed asset URLs expire after ~1 h, so entries are dropped after _TTL.
 _TTL = 1800
-_BAND_CACHE_MAX = 32
+
+# A band read is the dominant cost and COG pixels never change, so reads are
+# cached twice: in memory on a byte budget (one 12-month Prithvi stack is 130+
+# reads, which an entry-counted cache evicted wholesale), and on disk, which
+# survives restarts. The disk key carries MAX_PIXELS because the app reads at
+# 1024 px and the Prithvi service natively -- same band, different pixels.
+_BAND_CACHE_BYTES = int(float(os.environ.get("AGRISENSE_BAND_CACHE_GB", "2")) * 2**30)
+_DISK_CACHE = os.environ.get("AGRISENSE_CACHE_DIR", "") or \
+    os.path.join(os.path.expanduser("~"), ".cache", "agrisense", "bands")
+_DISK_CACHE_BYTES = int(float(os.environ.get("AGRISENSE_DISK_CACHE_GB", "20")) * 2**30)
 
 # Candidates per search. Cloud-sorted hits are often tiles that merely clip the
 # area, so _pick_scene needs enough of them to find a pass that covers it.
@@ -36,14 +46,91 @@ MAX_PIXELS = int(os.environ.get("AGRISENSE_MAX_PX", "1024"))
 _catalog = None
 _scene_cache: dict = {}
 _band_cache: OrderedDict = OrderedDict()
+_band_bytes = 0
+_disk_writes = 0
 _cache_lock = Lock()
 
 
 def clear_caches():
-    """Drop every cached scene and band (used by bench.py)."""
+    """Drop every cached scene and band (used by bench.py). Disk cache is kept."""
+    global _band_bytes
     with _cache_lock:
         _scene_cache.clear()
         _band_cache.clear()
+        _band_bytes = 0
+
+
+def _disk_path(key):
+    return os.path.join(_DISK_CACHE, key[:2], key + ".npz")
+
+
+def _disk_get(key):
+    """Cached read from disk, or None. A half-written file just misses."""
+    path = _disk_path(key)
+    try:
+        with np.load(path) as z:
+            out = (z["data"], rasterio.Affine(*z["tf"]), str(z["crs"]))
+        os.utime(path, None)            # touch: disk eviction is LRU by mtime
+        return out
+    except Exception:                   # noqa: BLE001 (missing, truncated, bad npz)
+        return None
+
+
+def _disk_put(key, out):
+    global _disk_writes
+    path = _disk_path(key)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "wb") as fh:     # a file object: savez would append .npz to a name
+            np.savez(fh, data=out[0], tf=np.array(tuple(out[1])[:6]), crs=out[2])
+        os.replace(tmp, path)           # atomic: a reader never sees a partial file
+    except Exception:                   # noqa: BLE001 (full disk, read-only mount)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return
+    with _cache_lock:
+        _disk_writes += 1
+        due = _disk_writes % 64 == 0
+    if due:
+        _disk_prune()
+
+
+def _disk_prune():
+    """Drop the least recently used files until the cache fits its budget."""
+    files = []
+    for root, _, names in os.walk(_DISK_CACHE):
+        for n in names:
+            f = os.path.join(root, n)
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue
+            files.append((st.st_mtime, st.st_size, f))
+    total = sum(f[1] for f in files)
+    for _, size, f in sorted(files):
+        if total <= _DISK_CACHE_BYTES:
+            break
+        try:
+            os.remove(f)
+            total -= size
+        except OSError:
+            pass
+
+
+def _band_remember(key, out):
+    """Keep the read in memory, evicting the least recently used over budget."""
+    global _band_bytes
+    with _cache_lock:
+        if key not in _band_cache:
+            _band_bytes += out[0].nbytes
+        _band_cache[key] = (time.time(), out)
+        _band_cache.move_to_end(key)
+        while _band_bytes > _BAND_CACHE_BYTES and len(_band_cache) > 1:
+            _, old = _band_cache.popitem(last=False)
+            _band_bytes -= old[1][0].nbytes
 
 
 def _cache_key_bbox(bbox):
@@ -245,6 +332,15 @@ def read_band(item, asset_name, bbox_lonlat, native_res, target_size=None):
             _band_cache.move_to_end(key)
             return hit[1]
 
+    # Pixels are immutable, so a disk hit is as good as a fresh read and costs
+    # no network. MAX_PIXELS is in the key: the same band read at 1024 px and
+    # natively are different arrays.
+    dkey = hashlib.sha1("|".join(map(str, (*key, MAX_PIXELS))).encode()).hexdigest()
+    cached = _disk_get(dkey)
+    if cached is not None:
+        _band_remember(key, cached)
+        return cached
+
     # SCL holds class numbers, so averaging neighbours would invent classes.
     resampling = Resampling.nearest if asset_name == "SCL" else Resampling.bilinear
     tiles = getattr(item, "tiles", [item])
@@ -269,10 +365,8 @@ def read_band(item, asset_name, bbox_lonlat, native_res, target_size=None):
 
     # Cached arrays are shared between callers, so treat them as read-only.
     out = (data, win_transform, crs)
-    with _cache_lock:
-        _band_cache[key] = (time.time(), out)
-        while len(_band_cache) > _BAND_CACHE_MAX:
-            _band_cache.popitem(last=False)
+    _band_remember(key, out)
+    _disk_put(dkey, out)
     return out
 
 
