@@ -540,6 +540,7 @@ async def cropmap(req: CropMapRequest, background_tasks: BackgroundTasks):
 # Deep-learning crop-model services, tried in order. Each speaks the same
 # /classify contract; if none answers, the rule-based classifier runs.
 _CROP_SERVICES = ("PRITHVI_URL", "TERRAMIND_URL")
+CROP_SERVICE_TIMEOUT = float(os.environ.get("CROP_SERVICE_TIMEOUT", "1800"))
 
 
 def _cropmap_service(job_id, bbox, year):
@@ -552,7 +553,8 @@ def _cropmap_service(job_id, bbox, year):
         jobs[job_id]["status"] = "computing"
         jobs[job_id]["message"] = "Running crop model on the GPU..."
         try:
-            resp = httpx.post(f"{url}/classify", timeout=240.0, json={
+            # A native-resolution map over a large area is minutes of GPU work.
+            resp = httpx.post(f"{url}/classify", timeout=CROP_SERVICE_TIMEOUT, json={
                 "bbox": bbox, "year": year, "date_ranges": _seasonal_ranges(year)})
             resp.raise_for_status()
             result = resp.json()
