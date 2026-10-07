@@ -65,7 +65,8 @@ area, one label per 150-600 m cell (`PRITHVI_STRIDE`, auto by area size).
 Validation accuracy of the checkpoint: 84.3% overall, 64.9% class-balanced.
 
 Put the checkpoint in `~/models/prithvi-sen4map/` (or set `PRITHVI_CKPT_DIR`),
-then start with the profile. The image builds on `agrisense-terramind:latest`.
+then start with the profile. The image is self-contained: `prithvi/requirements.lock`
+pins the exact package set the checkpoint was verified with.
 
 ```bash
 docker compose --profile prithvi up -d --wait
